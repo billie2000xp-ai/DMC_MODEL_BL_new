@@ -676,6 +676,20 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     rw_sync_gray = false;
     rw_issue_valid = false;
     rw_issue_type = DATA_READ;
+    rw_req_valid = false;
+    rw_req_type = DATA_READ;
+    pseudo_rw_conf_cnt = 0;
+    mrd_rd_issue_gap = 0;
+    mrd_wr_issue_gap = 0;
+    mrd_switch_to_read = false;
+    mrd_switch_to_write = false;
+    mrd_peer_read_cnt = 0;
+    mrd_peer_write_cnt = 0;
+    mrd_peer_switch_to_read = false;
+    mrd_peer_switch_to_write = false;
+    mrd_bp_read_req = false;
+    mrd_bp_write_req = false;
+    mrd_wr_availability = 0;
     serial_cmd_cnt = 0x0;
     rwgrp_ch_cmd_cnt = 0x0;
     rankgrp_ch_cmd_cnt = 0x0;
@@ -1041,13 +1055,13 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
         unsigned mid, unsigned pf_type, unsigned rank, bool wb_flag) {
     uint32_t delay = (now() - timeAdded);
     // =========================================================================
-    // 1. 拦截内部任务：ECC 模式 1 的回读完�?(Read -> Write)
+    // 1. 拦截内部任务：ECC 模式 1 的回读完�?(Read -> Write)
     // =========================================================================
     if (wb_flag) {
         auto it = ecc_wb_pending_rd.find(task);
         if (it != ecc_wb_pending_rd.end()) {
             TRANS_MSG &msg = it->second;            
-            // 阶段 2：读返回了，现在生成真正的回�?(WRITE) 命令
+            // 阶段 2：读返回了，现在生成真正的回�?(WRITE) 命令
             Transaction *trans = new Transaction;
             trans->transactionType = DATA_WRITE;
             trans->address = msg.address;
@@ -1066,8 +1080,8 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
             trans->mask_wcmd = false;
             trans->ap_cmd = false;
             trans->data_ready_cnt = trans->burst_length + 1;
-            trans->wb = true; // 标记为回�?
-            // 将单指针赋值改为直接进入发送队�?
+            trans->wb = true; // 标记为回�?
+            // 将单指针赋值改为直接进入发送队�?
             ecc_wb_queue.push_back(trans);
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 READ Finished -> Generated WRITE, internal_task="
@@ -1076,7 +1090,7 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
             
             ecc_wb_pending_rd.erase(it); // 清理字典
         }
-        // 内部的读命令不应该计入正常的业务读延迟统计中，直�?return
+        // 内部的读命令不应该计入正常的业务读延迟统计中，直�?return
         return; 
     }
 
@@ -1109,7 +1123,7 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
         min_delay_id = task;
     }
     
-    // 外部任务完成，进�?ECC 回写触发判断
+    // 外部任务完成，进�?ECC 回写触发判断
     if (ECC_WB_EN) {
         ecc_wb_cnt++;
         if (ecc_wb_cnt >= ECC_WB_TH) {
@@ -1118,7 +1132,7 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
             if (it != pending_TransactionQue.end()) {
                 TRANS_MSG &msg = it->second;                
                 if (ECC_WB_MODE == 0) {
-                    // 模式0：直接回�?
+                    // 模式0：直接回�?
                     Transaction *trans = new Transaction;
                     trans->transactionType = DATA_WRITE;
                     trans->address = msg.address;
@@ -1145,7 +1159,7 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
                     }
                 } 
                 else if (ECC_WB_MODE == 1) {
-                    // 模式1：阶�?1 -> 生成回读命令 (DATA_READ)
+                    // 模式1：阶�?1 -> 生成回读命令 (DATA_READ)
                     Transaction *trans = new Transaction;
                     trans->transactionType = DATA_READ;
                     trans->address = msg.address;
@@ -1164,9 +1178,9 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
                     trans->mask_wcmd = false;
                     trans->ap_cmd = false;
                     trans->wb = true;
-                    // 备份上下文到字典中，等待这个 read 返回时使�?
+                    // 备份上下文到字典中，等待这个 read 返回时使�?
                     ecc_wb_pending_rd[trans->task] = msg;
-                    // 同样放入延迟暂存区，模拟检错延�?
+                    // 同样放入延迟暂存区，模拟检错延�?
                     uint64_t target_time = now() + ceil(float(tWB_DLY) / tDFI);
                     delayed_ecc_wb_queue.push_back({trans, target_time});
                     if (DEBUG_BUS) {
@@ -3856,7 +3870,7 @@ void MemoryController::gd2_dist_refresh() {
                 }
             }
 
-            // ========== 新增 bank 级处理（添加在原有逻辑之后�?==========
+            // ========== 新增 bank 级处理（添加在原有逻辑之后�?==========
             // 处理 bank 级预充电次数累积
             if (DistRefState[bank].pre_cmd_cnt_bank >= PRE_NUM_SEND_PBR_BANK) {
                 DistRefState[bank].pre_cmd_cnt_bank = 0;
@@ -3868,7 +3882,7 @@ void MemoryController::gd2_dist_refresh() {
                 // assert(0);
             }
 
-            // 设置 bank 级强制刷新标�?
+            // 设置 bank 级强制刷新标�?
             DistRefState[bank].force_dist_refresh_bank = false;
             // if (DistRefState[bank].dist_pstpnd_num_bank >= PBR_PSTPND_LEVEL) {
             //     DistRefState[bank].force_dist_refresh_bank = true;
@@ -3878,7 +3892,7 @@ void MemoryController::gd2_dist_refresh() {
                 bank_distref_ready = true;
             }
 
-            // ========== 原有 bank 状态检查（完全保留�?==========
+            // ========== 原有 bank 状态检查（完全保留�?==========
             if (bankStates[bank].state->currentBankState != Idle &&
                     bankStates[bank].state->currentBankState != Refreshing) continue;
             if (!DistRefState[bank].force_dist_refresh && bank_cnt[bank] > 0 &&
@@ -3888,7 +3902,7 @@ void MemoryController::gd2_dist_refresh() {
             if (bankStates[bank].state->act_executing) continue;
             if (SEND_DSTREF_SERIAL && has_bank_distref && distref_bank != bank) continue;
 
-            // ========== 优先级判断：�?matgrp 触发则处�?matgrp，否则处�?bank ==========
+            // ========== 优先级判断：�?matgrp 触发则处�?matgrp，否则处�?bank ==========
             if (has_matgrp_distref || bank_distref_ready) {
                 unsigned rank = bank / NUM_BANKS;
                 funcState[rank].wakeup = true;
@@ -5394,6 +5408,7 @@ unsigned MemoryController::priority_pri(Cmd *cmd) {
 descriptor: main scheduler,The purpose of this function is selecting the best task to perform from the queue
 ****************************************************************************************************/
 void MemoryController::scheduler() {
+    rw_issue_valid = false;
     if (CmdQueue.empty()) return;
 
     if (RCMD_BANK_ARB_EN && rw_group_state[0] != NO_GROUP) {
@@ -5511,6 +5526,15 @@ void MemoryController::scheduler() {
 
     arb_enable = false;
     if (c->cmd_type >= WRITE_CMD && c->cmd_type <= READ_P_CMD) {
+        rw_req_valid = true;
+        rw_req_type = c->type;
+        rw_issue_valid = true;
+        rw_issue_type = c->type;
+        if (c->type == DATA_READ) {
+            mrd_rd_issue_gap = 0;
+        } else {
+            mrd_wr_issue_gap = 0;
+        }
         no_sch_cmd_en = true;
         no_sch_cmd_cnt = 0x0;
         page_rw_cnt ++;
@@ -6598,6 +6622,7 @@ float MemoryController::CalcBwByByte(uint64_t byte, unsigned cycle) {
 void MemoryController::update_statistics() {
     if (DMC_BW_WIN != 0 && now() % DMC_BW_WIN == 0) {
         availability = unsigned(CalcBwByByte(bw_totalcmds, DMC_BW_WIN));
+        mrd_wr_availability = unsigned(CalcBwByByte(bw_totalwrites, DMC_BW_WIN));
         bw_totalcmds   = 0;
         bw_totalwrites = 0;
         bw_totalreads  = 0;
@@ -6800,6 +6825,8 @@ void MemoryController::update() {
     update_lp_state();
 
     update_wdata();
+
+    rw_req_valid = false;
 
     update_grt_fifo();
 
@@ -7395,7 +7422,7 @@ bool MemoryController::IsRWGray() {
     if (rw_group_state[0] == NO_GROUP) return false;
     bool intent_is_read = (rw_group_state[0] == READ_GROUP);
     bool physical_is_write = in_write_group;
-    // 如果意图和物理现状一致，处于稳态，无灰�?
+    // 如果意图和物理现状一致，处于稳态，无灰�?
     if ((intent_is_read && !physical_is_write) || (!intent_is_read && physical_is_write)) {
         return false; 
     }
@@ -7403,7 +7430,7 @@ bool MemoryController::IsRWGray() {
     bool old_needs_drain = false;
     bool new_ready_for_cas = false;
 
-    // 遍历队列，同时打探新旧方向命令状�?
+    // 遍历队列，同时打探新旧方向命令状�?
     for (auto &trans : transactionQueue) {
         if (trans->timeout) continue;
         
@@ -7437,25 +7464,66 @@ bool MemoryController::IsRWGray() {
 }
 
 void MemoryController::SetRwSyncHint(bool valid, uint8_t target_group, bool is_rw_gray) {
-    if (DEBUG_BUS) {
-        PRINTN(setw(10) << now() << " -- SYNC_HINT :: ch=" << channel 
-               << " valid=" << valid 
-               << " block=" << is_rw_gray 
-               << " target=" << (unsigned)target_group 
-               << (target_group == READ_GROUP ? "(READ)" : 
-                  (target_group == WRITE_GROUP ? "(WRITE)" : "(NO_GROUP)")) 
-               << endl);
-    }
+    rw_sync_hint_valid = false;
+    rw_sync_hint_group = NO_GROUP;
+    rw_sync_gray = false;
+    pseudo_rw_conf_cnt = 0;
+}
 
-    rw_sync_hint_valid = valid;
-    rw_sync_hint_group = target_group;
-    rw_sync_gray = is_rw_gray;
-
-    if (valid && target_group != NO_GROUP && target_group != rw_group_state.back()) {
-        rw_group_state.push_back(target_group);
-        serial_cmd_cnt = 0x0;
-        rwgrp_ch_cmd_cnt = 0x0;
+void MemoryController::SetPseudoRwSyncHint(bool valid, uint8_t type, unsigned cnt) {
+    if (valid) {
+        rw_sync_hint_valid = true;
+        rw_sync_hint_group = type;
+        pseudo_rw_conf_cnt = cnt;
+    } else if (pseudo_rw_conf_cnt > 0) {
+        pseudo_rw_conf_cnt --;
+        rw_sync_hint_valid = pseudo_rw_conf_cnt > 0;
+    } else {
+        rw_sync_hint_valid = false;
     }
+}
+
+bool MemoryController::HasRwIssue() const {
+    return rw_issue_valid;
+}
+
+uint8_t MemoryController::GetRwIssueType() const {
+    return rw_issue_type;
+}
+
+bool MemoryController::HasRwReq() const {
+    return rw_req_valid;
+}
+
+uint8_t MemoryController::GetRwReqType() const {
+    return rw_req_type;
+}
+
+bool MemoryController::HasReadyCasType(uint8_t type) const {
+    for (auto &trans : transactionQueue) {
+        if (trans->timeout) continue;
+        if (trans->issue_size != 0) continue;
+        if (trans->act_executing) continue;
+        if (trans->transactionType != type) continue;
+        if (trans->transactionType != DATA_READ && trans->data_ready_cnt <= trans->burst_length) continue;
+        if (trans->nextCmd >= WRITE_CMD && trans->nextCmd <= READ_P_CMD) return true;
+    }
+    return false;
+}
+
+bool MemoryController::GetMrdSwitchToRead() const {
+    return mrd_switch_to_read;
+}
+
+bool MemoryController::GetMrdSwitchToWrite() const {
+    return mrd_switch_to_write;
+}
+
+void MemoryController::SetMrdPeerState(unsigned peer_read_cnt, unsigned peer_write_cnt, bool peer_switch_to_read, bool peer_switch_to_write) {
+    mrd_peer_read_cnt = peer_read_cnt;
+    mrd_peer_write_cnt = peer_write_cnt;
+    mrd_peer_switch_to_read = peer_switch_to_read;
+    mrd_peer_switch_to_write = peer_switch_to_write;
 }
 
 uint8_t MemoryController::GetRwGroupTarget() const {
@@ -8044,7 +8112,7 @@ void MemoryController::update_state_pre() {
                 if (head->transactionType == DATA_READ) {
                     push_pending_TransactionQue(head);
                 }
-                // 成功入队后，从队列头部抹�?
+                // 成功入队后，从队列头部抹�?
                 ecc_wb_queue.erase(ecc_wb_queue.begin());
             }
         }
@@ -8053,7 +8121,7 @@ void MemoryController::update_state_pre() {
             Transaction *head = ps_rd_queue.front();
             bool accepted = addTransaction(head);
             if (accepted) {
-                // 成功入队后弹�?
+                // 成功入队后弹�?
                 ps_rd_queue.erase(ps_rd_queue.begin());
             }
         }
@@ -8130,18 +8198,18 @@ void MemoryController::update_state_pre() {
 descriptor: update patrol_scrubbing
 ****************************************************************************************************/
 void MemoryController::update_patrol_scrubbing() {
-    // 1. 如果未开启巡检，直接返�?
+    // 1. 如果未开启巡检，直接返�?
     if (!PS_EN) return;
 
-    // 2. 移除 ps_rd_trans == nullptr 的阻塞判断。增加深度限制，防止在极端死锁情况下无限制生成导致内存泄�?
+    // 2. 移除 ps_rd_trans == nullptr 的阻塞判断。增加深度限制，防止在极端死锁情况下无限制生成导致内存泄�?
     if (ps_rd_queue.size() < 16 && now() >= next_ps_cycle) {
         
         Transaction *trans = new Transaction();
         
-        // --- A. 配置基础数据属�?---
+        // --- A. 配置基础数据属�?---
         trans->transactionType = DATA_READ;
         trans->address = current_ps_addr;
-        trans->data_size = 256;  // 256B 巡检�?
+        trans->data_size = 256;  // 256B 巡检�?
         
         // 计算 Burst Length
         trans->burst_length = 256 * 8 / DMC_DATA_BUS_BITS - 1; 
@@ -8156,14 +8224,14 @@ void MemoryController::update_patrol_scrubbing() {
         trans->sid = ps_sid;
         trans->group = ps_group;
         trans->bank = ps_bank;
-        // 这里�?bankIndex 计算保持逻辑一�?
+        // 这里�?bankIndex 计算保持逻辑一�?
         trans->bankIndex = (ps_rank * NUM_SIDS + ps_sid) * NUM_BANKS + ps_group * (NUM_BANKS/NUM_GROUPS) + ps_bank; 
         trans->row = ps_row;
         trans->col = ps_col; 
         
         // --- D. 调度器属性与递增 Task ID ---
         
-        // 修改：task �?f 开始递增
+        // 修改：task �?f 开始递增
         trans->task = 0xFFFFFFFFFFFFFFFFULL - (ps_task_counter % 8388608);
         ps_task_counter++; 
         
@@ -8185,7 +8253,7 @@ void MemoryController::update_patrol_scrubbing() {
                    << " (Rank:" << ps_rank << " Bank:" << trans->bankIndex << " Row:" << ps_row << " Col:" << ps_col << ")"<<endl);
         }
 
-        // --- F. 更新下一次触发时�?---
+        // --- F. 更新下一次触发时�?---
         next_ps_cycle = now() + ceil(float(tPS)/tDFI);
         
         // --- G. 地址与物理坐标递增 (核心逻辑修改：col -> bank -> group -> sid -> row) ---  
@@ -8194,23 +8262,23 @@ void MemoryController::update_patrol_scrubbing() {
 
         if (ps_col >= col_size_bytes) {
             ps_col = 0;         // 1. 列满进位
-            ps_bank++;          // 2. 转向下一�?Bank，而不是下一�?
+            ps_bank++;          // 2. 转向下一�?Bank，而不是下一�?
 
             if (ps_bank >= (NUM_BANKS / NUM_GROUPS)) {
                 ps_bank = 0;
-                ps_group++;     // 3. 转向下一�?Group
+                ps_group++;     // 3. 转向下一�?Group
 
                 if (ps_group >= NUM_GROUPS) {
                     ps_group = 0;
-                    ps_sid++;   // 4. 转向下一�?SID
+                    ps_sid++;   // 4. 转向下一�?SID
 
                     if (ps_sid >= NUM_SIDS) {
                         ps_sid = 0;
-                        ps_row++; // 5. 只有当所�?SID/Group/Bank 的当前行都扫过一遍，才增加行�?
+                        ps_row++; // 5. 只有当所�?SID/Group/Bank 的当前行都扫过一遍，才增加行�?
 
                         if (ps_row >= NUM_ROWS) {
                             ps_row = 0;
-                            ps_rank++; // 6. 转向下一�?Rank
+                            ps_rank++; // 6. 转向下一�?Rank
                             
                             if (ps_rank >= NUM_RANKS) {
                                 ps_rank = 0; 
@@ -8225,13 +8293,13 @@ void MemoryController::update_patrol_scrubbing() {
 }
 
 void MemoryController::update_ecc_wb_delay() {
-    // 按顺序检查延迟队列中最早的任务 由于时间戳是递增的，只要队首任务没到时间，后面的肯定也没�?
+    // 按顺序检查延迟队列中最早的任务 由于时间戳是递增的，只要队首任务没到时间，后面的肯定也没�?
     while (!delayed_ecc_wb_queue.empty()) {
         auto& front_item = delayed_ecc_wb_queue.front();
         uint64_t target_time = front_item.second;
         
         if (now() >= target_time) {
-            // 时间到了！将任务推入真正的发送队�?
+            // 时间到了！将任务推入真正的发送队�?
             ecc_wb_queue.push_back(front_item.first);
             
             if (DEBUG_BUS) {
@@ -8934,6 +9002,30 @@ void MemoryController::lc(Transaction *t) {
         }
     }
 
+    if (DMC_RW_SYNC_EN) {
+        bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
+        bool bw_wr_mrdimm = availability >= 95 && mrd_wr_availability >= 45;
+        unsigned icfg_rdwr_chg_gap = 24;
+        unsigned icfg_mrd_rcmd_lvl2 = 16;
+        unsigned icfg_mrd_wcmd_lvl2 = 16;
+        bool allow_mrd_bp = is_cas_cmd && !t->timeout && t->issue_size == 0 && !t->act_executing && bw_wr_mrdimm;
+        mrd_switch_to_write = (mrd_rd_issue_gap >= icfg_rdwr_chg_gap) && que_write_cnt >= icfg_mrd_wcmd_lvl2 && mrd_peer_write_cnt >= icfg_mrd_wcmd_lvl2;
+        mrd_switch_to_read = (mrd_wr_issue_gap >= icfg_rdwr_chg_gap) && que_read_cnt >= icfg_mrd_rcmd_lvl2 && mrd_peer_read_cnt >= icfg_mrd_rcmd_lvl2;
+        mrd_bp_read_req = allow_mrd_bp && t->transactionType == DATA_READ && !mrd_switch_to_read &&
+                (mrd_switch_to_write || mrd_peer_switch_to_write);
+        mrd_bp_write_req = allow_mrd_bp && t->transactionType != DATA_READ && !mrd_switch_to_write &&
+                (mrd_switch_to_read || mrd_peer_switch_to_read);
+        if (mrd_bp_read_req || mrd_bp_write_req) {
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- LC :: MRDIMM RW change backpress. task="<<t->task
+                        <<", trans_type="<<t->transactionType<<", rcnt="<<que_read_cnt<<", wcnt="<<que_write_cnt
+                        <<", peer_r="<<mrd_peer_read_cnt<<", peer_w="<<mrd_peer_write_cnt
+                        <<", rd_gap="<<mrd_rd_issue_gap<<", wr_gap="<<mrd_wr_issue_gap<<endl);
+            }
+            return;
+        }
+    }
+
     if (rk_grp_state != NO_RGRP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         uint8_t t_state = (t->rank << 1) | uint8_t(t->transactionType);
@@ -8959,27 +9051,17 @@ void MemoryController::lc(Transaction *t) {
     if (rw_group_state[0] != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         if (DMC_RW_SYNC_EN) {
-            bool is_new_dir_cmd = (rw_group_state[0] == READ_GROUP && t->transactionType == DATA_READ) ||
-                                  (rw_group_state[0] == WRITE_GROUP && t->transactionType != DATA_READ);
             bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
-            
-            if (rw_sync_gray) {
-                if (is_new_dir_cmd && is_cas_cmd) {
-                    if (DEBUG_BUS) {
-                        PRINTN(setw(10)<<now()<<" -- LC :: SYNC Gray Phase backpress new dir CAS. task="<<t->task<<endl);
-                    }
-                    return; // 拦截�?CAS，强行拉�?in_write_group 的翻转时�?
+            if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir CAS. task="
+                            <<t->task<<", trans_type="<<t->transactionType
+                            <<", pseudo_type="<<+rw_sync_hint_group
+                            <<", conf_cnt="<<pseudo_rw_conf_cnt<<endl);
                 }
-            } else {
-                if (!is_new_dir_cmd) {
-                    if (DEBUG_BUS) {
-                        PRINTN(setw(10)<<now()<<" -- LC :: SYNC Stable Phase backpress old dir cmd. task="<<t->task<<endl);
-                    }
-                    return;
-                }
+                return;
             }
         }
-        // 原单通道逻辑
         if (rw_group_state[0] == READ_GROUP && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))) {
             if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !in_write_group) {
                 if (DEBUG_BUS) {
@@ -9074,11 +9156,13 @@ void MemoryController::lc(Transaction *t) {
     }
 
     bool timing_met = false;
+    bool cas_cmd_timing_met = false;
     switch (t->nextCmd) {
         case READ_CMD : {
             if (has_cmd_bp()) break;
             if ((now() + 1) >= bankStates[t->bankIndex].state->nextRead) {
                 timing_met = true;
+                cas_cmd_timing_met = true;
                 if (t->issue_size == 0) cmd_rdmet_cnt ++;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: READ timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
@@ -9090,6 +9174,7 @@ void MemoryController::lc(Transaction *t) {
             if (has_cmd_bp()) break;
             if ((now() + 1) >= bankStates[t->bankIndex].state->nextReadAp) {
                 timing_met = true;
+                cas_cmd_timing_met = true;
                 if (t->issue_size == 0) cmd_rdmet_cnt ++;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: READ_P timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
@@ -9104,6 +9189,7 @@ void MemoryController::lc(Transaction *t) {
                     // next command is RMW
                     if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteRmw) {
                         timing_met = true;
+                        cas_cmd_timing_met = true;
                         if (DEBUG_BUS) {
                             PRINTN(setw(10)<<now()<<" -- LC :: WRITE RMW timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                         }
@@ -9112,6 +9198,7 @@ void MemoryController::lc(Transaction *t) {
                     // next command is JW
                     if ((now() + 1) >= bankStates[t->bankIndex].state->nextWrite) {
                         timing_met = true;
+                        cas_cmd_timing_met = true;
                         if (DEBUG_BUS) {
                             PRINTN(setw(10)<<now()<<" -- LC :: WRITE JW timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                         }
@@ -9123,6 +9210,7 @@ void MemoryController::lc(Transaction *t) {
             } else {
                 if ((now() + 1) >= bankStates[t->bankIndex].state->nextWrite) {
                     timing_met = true;
+                    cas_cmd_timing_met = true;
                     if (DEBUG_BUS) {
                         PRINTN(setw(10)<<now()<<" -- LC :: WRITE timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                     }
@@ -9137,6 +9225,7 @@ void MemoryController::lc(Transaction *t) {
                     // next command is RMW
                     if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteApRmw) {
                         timing_met = true;
+                        cas_cmd_timing_met = true;
                         if (DEBUG_BUS) {
                             PRINTN(setw(10)<<now()<<" -- LC :: WRITE_P RMW timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                         }
@@ -9145,6 +9234,7 @@ void MemoryController::lc(Transaction *t) {
                     // next command is JW
                     if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteAp) {
                         timing_met = true;
+                        cas_cmd_timing_met = true;
                         if (DEBUG_BUS) {
                             PRINTN(setw(10)<<now()<<" -- LC :: WRITE_P JW timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                         }
@@ -9156,6 +9246,7 @@ void MemoryController::lc(Transaction *t) {
             } else {
                 if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteAp) {
                     timing_met = true;
+                    cas_cmd_timing_met = true;
                     if (DEBUG_BUS) {
                         PRINTN(setw(10)<<now()<<" -- LC :: WRITE_P timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                     }
@@ -9242,7 +9333,16 @@ void MemoryController::lc(Transaction *t) {
         default:break;
     }
 
+    if (DMC_RW_SYNC_EN && cas_cmd_timing_met) {
+        if (t->transactionType == DATA_READ) mrd_wr_issue_gap ++;
+        else mrd_rd_issue_gap ++;
+    }
+
     if (timing_met) {
+        if (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD) {
+            rw_req_valid = true;
+            rw_req_type = t->transactionType;
+        }
         Cmd *c = new Cmd;
         if (((t->issue_size + t->trans_size) >= t->data_size) &&
                 ((t->nextCmd != PRECHARGE_PB_CMD && t->nextCmd != ACTIVATE2_CMD))) {
@@ -9452,7 +9552,7 @@ bool MemoryController::push_req(Transaction * trans) {
 //    DEBUG(now()<<" push_req0, sc_num="<<sc_num); 
     write_port_busy_this_cycle = true;
     
-    // 处理正常的外部请�?
+    // 处理正常的外部请�?
     if (PERFECT_DMC_EN) {
         if (trans->transactionType == DATA_READ) {
             for (size_t i = 0; i <= trans->burst_length; i ++) {
