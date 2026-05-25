@@ -1033,23 +1033,47 @@ void LPMemorySystemTop::update() {
     }
 
     if (DMC_RW_SYNC_EN && NUM_CHANS >= 2) {
-        bool global_rw_switch_gray = false;
         for (size_t i = 0; i < NUM_CHANS; i++) {
-            if (channels[i]->memoryController->IsRWGray()) {
-                global_rw_switch_gray = true;
-                break;
+            unsigned peer_read_cnt = 0;
+            unsigned peer_write_cnt = 0;
+            bool peer_switch_to_read = false;
+            bool peer_switch_to_write = false;
+            for (size_t j = 0; j < NUM_CHANS; j++) {
+                if (i == j) continue;
+                MemoryController *other = channels[j]->memoryController;
+                peer_read_cnt += other->Read_Cnt();
+                peer_write_cnt += other->Write_Cnt();
+                peer_switch_to_read |= other->GetMrdSwitchToRead();
+                peer_switch_to_write |= other->GetMrdSwitchToWrite();
             }
+            channels[i]->memoryController->SetMrdPeerState(peer_read_cnt, peer_write_cnt, peer_switch_to_read, peer_switch_to_write);
         }
 
-        channels[0]->memoryController->SetRwSyncHint(false, NO_GROUP, global_rw_switch_gray);
-        channels[0]->update();
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            channels[i]->memoryController->SetPseudoRwSyncHint(false, DATA_READ, 0);
+        }
 
-        MemoryController *master = channels[0]->memoryController;
-        for (size_t i = 1; i < NUM_CHANS; i++) {
-            channels[i]->memoryController->SetRwSyncHint(true,
-                    master->GetRwGroupTarget(),
-                    global_rw_switch_gray);
+        for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->update();
+        }
+
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            MemoryController *mc = channels[i]->memoryController;
+            bool other_read_issue = false;
+            bool other_write_issue = false;
+            for (size_t j = 0; j < NUM_CHANS; j++) {
+                if (i == j) continue;
+                MemoryController *other = channels[j]->memoryController;
+                if (!other->HasRwIssue()) continue;
+                if (other->GetRwIssueType() == DATA_READ) other_read_issue = true;
+                else other_write_issue = true;
+            }
+            bool pseudo_read_conflict = other_read_issue && mc->HasRwReq() && mc->GetRwReqType() == DATA_WRITE;
+            bool pseudo_write_conflict = other_write_issue && mc->HasRwReq() && mc->GetRwReqType() == DATA_READ;
+            if (pseudo_read_conflict || pseudo_write_conflict) {
+                uint8_t pseudo_rw_type = pseudo_read_conflict ? DATA_READ : DATA_WRITE;
+                mc->SetPseudoRwSyncHint(true, pseudo_rw_type, 3);
+            }
         }
     } else {
         for (size_t i = 0; i < NUM_CHANS; i++) {
@@ -1169,10 +1193,6 @@ uint32_t LPMemorySystemTop::getDmcPressureLevel() {
 }
 
 bool LPMemorySystemTop::addData(uint32_t *data,uint32_t channel,uint64_t id) {
-    if (RMW_ENABLE && rmw->pre_req_data_time == rmw->now()) {
-        return false;
-    }
-    
     if (EM_ENABLE && EM_MODE==0) channel = 0;
 
     bool ret = false;
