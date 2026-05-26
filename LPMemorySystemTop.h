@@ -1,3 +1,10 @@
+/*
+* Copyright @ Huawei Technologies Co., Ltd. 2019-2029. All rights reserved.
+* Description: LPMemorySystemTop.h
+* Author: l00434636
+* Create: 2020-10-27
+*/
+
 #ifndef _LPDDR_LPMEMORYSYSTEMTOP_H_
 #define _LPDDR_LPMEMORYSYSTEMTOP_H_
 
@@ -33,10 +40,10 @@ struct data_message {
 class LPMemorySystemTop : public SimulatorObject {
 public:
 #ifdef SYSARCH_PLATFORM
-    LPMemorySystemTop(unsigned id, string IniFilePath = "./parameter", string LogPath = "./log",
+    LPMemorySystemTop(unsigned id, string log_sufffix = "_0_0_", string IniFilePath = "./parameter", string LogPath = "./log",
             HALib::Configurable* cfg = NULL);
 #else
-    LPMemorySystemTop(unsigned id, string IniFilePath = "./parameter", string LogPath = "./log",
+    LPMemorySystemTop(unsigned id, string log_sufffix = "_0_0_", string IniFilePath = "./parameter", string LogPath = "./log",
             int argc = 0, char *argv[] = NULL);
 #endif
     virtual ~LPMemorySystemTop();
@@ -62,7 +69,7 @@ public:
     uint32_t getTransQueSize(uint32_t dmc_id, bool isRd);
     uint32_t getRmwQueueCmdNum() const;
     bool emit_write_done(unsigned channel, uint64_t task, double readDataEnterDmcTime,
-            double reqAddToDmcTime, double reqEnterDmcBufTime);
+        double reqAddToDmcTime, double reqEnterDmcBufTime);
 
     //output file
     ofstream DDRSim_log;
@@ -113,15 +120,29 @@ private:
     TransactionCompleteCB *read_done_cb;
     TransactionCompleteCB *cmd_done_cb;
     vector<DmcCallbackProxy *> dmc_callback_proxies;
+    // 新增：Top层汇聚缓存结构与队列
+    struct TopRespPacket {
+        unsigned channel;
+        uint64_t task;
+        double readDataEnterDmcTime;
+        double reqAddToDmcTime;
+        double reqEnterDmcBufTime;
+    };
+
+    std::deque<TopRespPacket> top_rdata_fifo;
+    std::deque<TopRespPacket> top_wresp_fifo;
+    std::deque<TopRespPacket> top_rresp_fifo;
+    std::deque<TopRespPacket> top_cmdresp_fifo;
+    bool top_rdata_active;
+    uint64_t top_rdata_task;
+    unsigned top_rdata_remain;
+    
+    const size_t TOP_RESP_FIFO_DEPTH = 16;
+
     vector<TransactionCompleteCB *> proxy_read_cbs;
     vector<TransactionCompleteCB *> proxy_write_cbs;
     vector<TransactionCompleteCB *> proxy_read_done_cbs;
     vector<TransactionCompleteCB *> proxy_cmd_cbs;
-    bool global_pseudo_rw_conf_valid;
-    uint8_t global_pseudo_rw_conf_type;
-    unsigned global_pseudo_rw_conf_cnt;
-    bool last_global_rw_valid;
-    uint8_t last_global_rw_type;
 
     void command_check(const hha_command &c);
     void wdata_check(uint64_t task, uint8_t channel);
