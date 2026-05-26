@@ -53,6 +53,11 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     write_cb = NULL;
     read_done_cb = NULL;
     cmd_done_cb = NULL;
+    global_pseudo_rw_conf_valid = false;
+    global_pseudo_rw_conf_type = DATA_READ;
+    global_pseudo_rw_conf_cnt = 0;
+    last_global_rw_valid = false;
+    last_global_rw_type = DATA_READ;
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -1049,6 +1054,56 @@ void LPMemorySystemTop::update() {
             channels[i]->memoryController->SetMrdPeerState(peer_read_cnt, peer_write_cnt, peer_switch_to_read, peer_switch_to_write);
         }
 
+        bool pending_read = false;
+        bool pending_write = false;
+        bool req_read = false;
+        bool req_write = false;
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            MemoryController *mc = channels[i]->memoryController;
+            if (mc->HasPendingDfiRw()) {
+                if (mc->GetPendingDfiRwType() == DATA_READ) {
+                    pending_read = true;
+                } else {
+                    pending_write = true;
+                }
+            }
+            if (mc->HasRwReq()) {
+                if (mc->GetRwReqType() == DATA_READ) {
+                    req_read = true;
+                } else {
+                    req_write = true;
+                }
+            }
+        }
+        bool observed_rw_valid = pending_read || pending_write || req_read || req_write;
+        bool observed_read = pending_read || req_read;
+        bool observed_write = pending_write || req_write;
+        uint8_t observed_rw_type;
+        if (observed_read && observed_write && last_global_rw_valid) {
+            observed_rw_type = last_global_rw_type;
+        } else {
+            observed_rw_type = (pending_read || (!pending_write && req_read)) ? DATA_READ : DATA_WRITE;
+        }
+        if (observed_rw_valid && last_global_rw_valid && observed_rw_type != last_global_rw_type) {
+            global_pseudo_rw_conf_valid = true;
+            global_pseudo_rw_conf_type = observed_rw_type;
+            global_pseudo_rw_conf_cnt = 3;
+        } else if (global_pseudo_rw_conf_cnt > 0) {
+            global_pseudo_rw_conf_cnt --;
+            global_pseudo_rw_conf_valid = global_pseudo_rw_conf_cnt > 0;
+        } else {
+            global_pseudo_rw_conf_valid = false;
+        }
+        bool global_rw_valid = global_pseudo_rw_conf_valid || observed_rw_valid;
+        uint8_t global_rw_type = global_pseudo_rw_conf_valid ? global_pseudo_rw_conf_type : observed_rw_type;
+        if (observed_rw_valid) {
+            last_global_rw_valid = true;
+            last_global_rw_type = observed_rw_type;
+        }
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            channels[i]->memoryController->SetGlobalRwSyncDirection(global_rw_valid, global_rw_type);
+        }
+
         for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->memoryController->SetPseudoRwSyncHint(false, DATA_READ, 0);
         }
@@ -1059,18 +1114,19 @@ void LPMemorySystemTop::update() {
 
         for (size_t i = 0; i < NUM_CHANS; i++) {
             MemoryController *mc = channels[i]->memoryController;
-            bool other_read_issue = false;
-            bool other_write_issue = false;
+            bool other_read_req = false;
+            bool other_write_req = false;
             for (size_t j = 0; j < NUM_CHANS; j++) {
                 if (i == j) continue;
                 MemoryController *other = channels[j]->memoryController;
-                if (!other->HasRwIssue()) continue;
-                if (other->GetRwIssueType() == DATA_READ) other_read_issue = true;
-                else other_write_issue = true;
+                if (other->HasRwReq()) {
+                    if (other->GetRwReqType() == DATA_READ) other_read_req = true;
+                    else other_write_req = true;
+                }
             }
-            bool pseudo_read_conflict = other_read_issue && mc->HasRwReq() && mc->GetRwReqType() == DATA_WRITE;
-            bool pseudo_write_conflict = other_write_issue && mc->HasRwReq() && mc->GetRwReqType() == DATA_READ;
-            if (pseudo_read_conflict || pseudo_write_conflict) {
+            bool pseudo_read_conflict = other_read_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_WRITE;
+            bool pseudo_write_conflict = other_write_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_READ;
+            if ((pseudo_read_conflict || pseudo_write_conflict) && !global_pseudo_rw_conf_valid) {
                 uint8_t pseudo_rw_type = pseudo_read_conflict ? DATA_READ : DATA_WRITE;
                 mc->SetPseudoRwSyncHint(true, pseudo_rw_type, 3);
             }
@@ -1078,8 +1134,12 @@ void LPMemorySystemTop::update() {
     } else {
         for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->memoryController->SetRwSyncHint(false, NO_GROUP, false);
+            channels[i]->memoryController->SetGlobalRwSyncDirection(false, DATA_READ);
             channels[i]->update();
         }
+        global_pseudo_rw_conf_valid = false;
+        global_pseudo_rw_conf_cnt = 0;
+        last_global_rw_valid = false;
     }
 
     if (RMW_ENABLE) {
