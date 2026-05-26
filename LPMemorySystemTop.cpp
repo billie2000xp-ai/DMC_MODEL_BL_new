@@ -43,10 +43,10 @@ bool LPMemorySystemTop::DmcCallbackProxy::cmd_done(unsigned channel, uint64_t ta
 }
 
 #ifdef SYSARCH_PLATFORM
-LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string LogPath,
+LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string IniFilePath, string LogPath,
         HALib::Configurable* cfg) : hhaId(hhaId) {
 #else
-LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string LogPath,
+LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string IniFilePath, string LogPath,
         int argc, char *argv[]) : hhaId(hhaId) {
 #endif
     read_cb = NULL;
@@ -321,6 +321,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     ECC_WB_EN = cfg->getBool("ECC_WB_EN");
     ECC_WB_MODE = cfg->getNumber("ECC_WB_MODE");
     ECC_WB_TH = cfg->getNumber("ECC_WB_TH");
+    WB_RATIO = cfg->getNumber("WB_RATIO");
     PS_EN = cfg->getBool("PS_EN");
     tPS = cfg->getNumber("tPS");
     tWB_DLY = cfg->getNumber("tWB_DLY");
@@ -619,6 +620,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     GET_PARAM(ECC_WB_EN, "ECC_WB_EN", getBool);
     GET_PARAM(ECC_WB_MODE, "ECC_WB_MODE", getUint);
     GET_PARAM(ECC_WB_TH, "ECC_WB_TH", getUint);
+    GET_PARAM(WB_RATIO, "WB_RATIO", getUint);
     GET_PARAM(PS_EN, "PS_EN", getBool);
     GET_PARAM(tPS, "tPS", getUint);
     GET_PARAM(tWB_DLY, "tWB_DLY", getUint);
@@ -903,7 +905,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     IniReader::CheckParameter();
 
     for (size_t dmcId=0; dmcId<NUM_CHANS; dmcId++) {
-        MemorySystem *channel = new MemorySystem(dmcId, hhaId, DDRSim_log ,LogPath);
+        MemorySystem *channel = new MemorySystem(dmcId, hhaId, log_sufffix, DDRSim_log ,LogPath);
         channels.push_back(channel);
     }
 
@@ -941,8 +943,12 @@ void LPMemorySystemTop::init_callback_proxies() {
 bool LPMemorySystemTop::handle_read_data(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    if (read_cb == NULL) return true;
-    return (*read_cb)(channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime);
+    // 如果 Top 层 FIFO 满了，触发底层 DMC 的反压 (rp_fifo)
+    if (top_rdata_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false; 
+    
+    // 没满就照单全收，底层 DMC 直接放行
+    top_rdata_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
+    return true;
 }
 
 bool LPMemorySystemTop::handle_write_done(unsigned dmc_id, unsigned channel, uint64_t task,
@@ -1146,6 +1152,7 @@ void LPMemorySystemTop::update() {
         rmw->step();
 
     }
+    step();
 
     //statistics for RMW
     if (STATE_TIME != 0) {
@@ -1155,6 +1162,39 @@ void LPMemorySystemTop::update() {
         }
     }
     rmw->check_cnt();
+
+    // Top 层的串行化向上游发送逻辑 (仲裁与汇聚吐出)
+    // 1. 吐出 Read Data
+    if (!top_rdata_fifo.empty()) {
+        auto &pkt = top_rdata_fifo.front();
+        if (read_cb == NULL || (*read_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+            top_rdata_fifo.pop_front(); // 上游接收成功（或没有挂载回调），弹出该数据
+        }
+    }
+
+    // 2. 吐出 Write Response
+    if (!top_wresp_fifo.empty()) {
+        auto &pkt = top_wresp_fifo.front();
+        if (write_cb == NULL || (*write_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+            top_wresp_fifo.pop_front();
+        }
+    }
+
+    // 3. 吐出 Read Response
+    if (!top_rresp_fifo.empty()) {
+        auto &pkt = top_rresp_fifo.front();
+        if (read_done_cb == NULL || (*read_done_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+            top_rresp_fifo.pop_front();
+        }
+    }
+
+    // 4. 吐出 Cmd Response
+    if (!top_cmdresp_fifo.empty()) {
+        auto &pkt = top_cmdresp_fifo.front();
+        if (cmd_done_cb == NULL || (*cmd_done_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+            top_cmdresp_fifo.pop_front();
+        }
+    }
 }
 
 uint8_t LPMemorySystemTop::get_occ(uint8_t chl) {
