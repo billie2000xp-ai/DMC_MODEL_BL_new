@@ -168,6 +168,11 @@ public:
     uint8_t GetRwIssueType() const;
     bool HasRwReq() const;
     uint8_t GetRwReqType() const;
+    bool HasLcRwMet() const;
+    uint8_t GetLcRwMetType() const;
+    bool HasPendingDfiRw() const;
+    uint8_t GetPendingDfiRwType() const;
+    void SetGlobalRwSyncDirection(bool valid, uint8_t type);
     bool HasReadyCasType(uint8_t type) const;
     bool GetMrdSwitchToRead() const;
     bool GetMrdSwitchToWrite() const;
@@ -464,6 +469,10 @@ public:
     uint8_t rw_issue_type;
     bool rw_req_valid;
     uint8_t rw_req_type;
+    bool lc_rw_met_valid;
+    uint8_t lc_rw_met_type;
+    bool global_rw_sync_valid;
+    uint8_t global_rw_sync_type;
     unsigned pseudo_rw_conf_cnt;
     unsigned mrd_rd_issue_gap;
     unsigned mrd_wr_issue_gap;
