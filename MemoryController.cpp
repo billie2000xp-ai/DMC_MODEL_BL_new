@@ -678,6 +678,10 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     rw_issue_type = DATA_READ;
     rw_req_valid = false;
     rw_req_type = DATA_READ;
+    lc_rw_met_valid = false;
+    lc_rw_met_type = DATA_READ;
+    global_rw_sync_valid = false;
+    global_rw_sync_type = DATA_READ;
     pseudo_rw_conf_cnt = 0;
     mrd_rd_issue_gap = 0;
     mrd_wr_issue_gap = 0;
@@ -3366,6 +3370,16 @@ void MemoryController::exec() {
             }
         }
         if (command_pend == 0) {
+            uint8_t dfi_rw_type = NO_GROUP;
+            if (command.type == READ_CMD || command.type == READ_P_CMD) dfi_rw_type = DATA_READ;
+            else if (command.type == WRITE_CMD || command.type == WRITE_P_CMD || command.type == WRITE_MASK_CMD || command.type == WRITE_MASK_P_CMD) dfi_rw_type = DATA_WRITE;
+            if (DMC_RW_SYNC_EN && dfi_rw_type != NO_GROUP && global_rw_sync_valid && dfi_rw_type != global_rw_sync_type) {
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- EXEC :: GLOBAL RW sync hold opposite dir DFI cmd type="<<+dfi_rw_type
+                            <<", global_type="<<+global_rw_sync_type<<endl);
+                }
+                return;
+            }
             phy p;
             p.command = command;
             p.delay = tCMD_PHY;
@@ -6827,6 +6841,7 @@ void MemoryController::update() {
     update_wdata();
 
     rw_req_valid = false;
+    lc_rw_met_valid = false;
 
     update_grt_fifo();
 
@@ -7497,6 +7512,30 @@ bool MemoryController::HasRwReq() const {
 
 uint8_t MemoryController::GetRwReqType() const {
     return rw_req_type;
+}
+
+bool MemoryController::HasLcRwMet() const {
+    return lc_rw_met_valid;
+}
+
+uint8_t MemoryController::GetLcRwMetType() const {
+    return lc_rw_met_type;
+}
+
+bool MemoryController::HasPendingDfiRw() const {
+    if (!exec_valid) return false;
+    return command.type == READ_CMD || command.type == READ_P_CMD || command.type == WRITE_CMD || command.type == WRITE_P_CMD
+            || command.type == WRITE_MASK_CMD || command.type == WRITE_MASK_P_CMD;
+}
+
+uint8_t MemoryController::GetPendingDfiRwType() const {
+    if (command.type == READ_CMD || command.type == READ_P_CMD) return DATA_READ;
+    return DATA_WRITE;
+}
+
+void MemoryController::SetGlobalRwSyncDirection(bool valid, uint8_t type) {
+    global_rw_sync_valid = valid;
+    global_rw_sync_type = type;
 }
 
 bool MemoryController::HasReadyCasType(uint8_t type) const {
@@ -9051,8 +9090,16 @@ void MemoryController::lc(Transaction *t) {
     if (rw_group_state[0] != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         if (DMC_RW_SYNC_EN) {
-            bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
-            if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
+                bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
+                if (is_cas_cmd && global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
+                    if (DEBUG_BUS) {
+                        PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir CAS. task="
+                                <<t->task<<", trans_type="<<t->transactionType
+                                <<", global_type="<<+global_rw_sync_type<<endl);
+                    }
+                    return;
+                }
+                if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir CAS. task="
                             <<t->task<<", trans_type="<<t->transactionType
@@ -9334,6 +9381,8 @@ void MemoryController::lc(Transaction *t) {
     }
 
     if (DMC_RW_SYNC_EN && cas_cmd_timing_met) {
+        lc_rw_met_valid = true;
+        lc_rw_met_type = t->transactionType;
         if (t->transactionType == DATA_READ) mrd_wr_issue_gap ++;
         else mrd_rd_issue_gap ++;
     }
