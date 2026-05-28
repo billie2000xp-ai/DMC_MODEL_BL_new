@@ -9118,6 +9118,22 @@ void MemoryController::lc(Transaction *t) {
 
     need_issue(t);
 
+    if (t->nextCmd == PRECHARGE_PB_CMD && t->timeout && t->issue_size == 0 && !t->act_executing) {
+        for (auto &other : transactionQueue) {
+            if (other->task == t->task) continue;
+            if (other->bankIndex != t->bankIndex) continue;
+            if (other->row != bankStates[t->bankIndex].state->openRowAddress) continue;
+            if (!other->timeout) continue;
+            if (!other->has_send_act && !other->act_executing) continue;
+            if (other->issue_size >= other->data_size) continue;
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- LC :: timeout PRE blocked by active timeout rowhit. task="
+                        <<t->task<<", bank="<<t->bankIndex<<", owner_task="<<other->task<<endl);
+            }
+            return;
+        }
+    }
+
     if (dresp_cnt >= DRESP_BP_TH && t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD
             && t->issue_size == 0) {
         if (DEBUG_BUS) {
@@ -9160,6 +9176,27 @@ void MemoryController::lc(Transaction *t) {
         }
     }
 
+    if (DMC_RW_SYNC_EN && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
+            && !t->act_executing) {
+        if (global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir. task="
+                        <<t->task<<", trans_type="<<t->transactionType
+                        <<", global_type="<<+global_rw_sync_type<<", nextCmd="<<t->nextCmd<<endl);
+            }
+            return;
+        }
+        if (rw_sync_hint_valid && t->transactionType != rw_sync_hint_group) {
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir. task="
+                        <<t->task<<", trans_type="<<t->transactionType
+                        <<", pseudo_type="<<+rw_sync_hint_group
+                        <<", conf_cnt="<<pseudo_rw_conf_cnt<<", nextCmd="<<t->nextCmd<<endl);
+            }
+            return;
+        }
+    }
+
     if (rk_grp_state != NO_RGRP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         uint8_t t_state = (t->rank << 1) | uint8_t(t->transactionType);
@@ -9184,26 +9221,6 @@ void MemoryController::lc(Transaction *t) {
 
     if (rw_group_state[0] != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
-        if (DMC_RW_SYNC_EN) {
-            bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
-            if (is_cas_cmd && global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
-                if (DEBUG_BUS) {
-                    PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir CAS. task="
-                            <<t->task<<", trans_type="<<t->transactionType
-                            <<", global_type="<<+global_rw_sync_type<<endl);
-                }
-                return;
-            }
-            if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
-                if (DEBUG_BUS) {
-                    PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir CAS. task="
-                            <<t->task<<", trans_type="<<t->transactionType
-                            <<", pseudo_type="<<+rw_sync_hint_group
-                            <<", conf_cnt="<<pseudo_rw_conf_cnt<<endl);
-                }
-                return;
-            }
-        }
         // 原单通道逻辑
         if (rw_group_state[0] == READ_GROUP && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))) {
             if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !in_write_group) {
