@@ -1,3 +1,10 @@
+/*
+* Copyright @ Huawei Technologies Co., Ltd. 2019-2029. All rights reserved.
+* Description: MemoryController.h
+* Author: l00434636
+* Create: 2020-10-27
+*/
+
 #ifndef _LPDDR_MEMORYCONTROLLER_H_
 #define _LPDDR_MEMORYCONTROLLER_H_
 
@@ -17,6 +24,8 @@
 #include <assert.h>
 #include <numeric>
 #include <algorithm>
+#include <unordered_set>
+#include <unordered_map>
 
 using namespace std;
 
@@ -38,7 +47,6 @@ struct task_info {
 struct wdata_pipe {
     uint64_t task = 0;
     uint64_t delay = 0;
-    uint64_t trans_delay = 0;
 };
 
 class MemorySystem;
@@ -174,17 +182,11 @@ public:
     uint8_t GetPendingDfiRwType() const;
     void SetGlobalRwSyncDirection(bool valid, uint8_t type);
     bool HasReadyCasType(uint8_t type) const;
+    unsigned GetRwQueueCnt(uint8_t type) const;
+    void SetGlobalRwSyncQueueState(unsigned same_cnt, unsigned opposite_cnt);
     bool GetMrdSwitchToRead() const;
     bool GetMrdSwitchToWrite() const;
     void SetMrdPeerState(unsigned peer_read_cnt, unsigned peer_write_cnt, bool peer_switch_to_read, bool peer_switch_to_write);
-    uint8_t GetRwGroupTarget() const;
-    uint8_t GetRwGroupCurrent() const;
-    bool HasRwSyncOldActive();
-    bool IsRwSyncSoftReady();
-    bool IsRWGray();
-    bool IsRwSyncStable() const;
-    void SetRwSyncAllowNewCas(bool allow);
-    void CountRwSyncReadyCas(uint8_t target_group, unsigned &target_ready, unsigned &opposite_ready) const;
     void update_group_state();
     void page_adapt_policy(Transaction *trans);
     void page_adpt_policy(Transaction *trans);
@@ -204,6 +206,7 @@ public:
             return ((DmcLog2(length, JEDEC_DATA_BUS_BITS)) / DMC_DATA_BUS_BITS);}
     unsigned Read_Cnt() {return que_read_cnt;};
     unsigned Write_Cnt() {return que_write_cnt;};
+    bool HasPendingWork() const;
     void PostCalcTiming();
     void calc_occ();
     unsigned get_occ() {return occ;}
@@ -238,39 +241,6 @@ public:
     unsigned TotalDmcWr64B;
     unsigned TotalDmcWr128B;
     unsigned TotalDmcWr256B;
-    uint64_t rw_sync_gray_bp_new_cas_cnt;
-    uint64_t rw_sync_stable_bp_old_cmd_cnt;
-    uint64_t rw_sync_hint_sample_cnt;
-    uint64_t rw_sync_hint_mismatch_cnt;
-    uint64_t rw_sync_hint_empty_target_cnt;
-    uint64_t rw_sync_hint_match_cnt;
-    uint64_t rw_sync_hint_target_ready_sum;
-    uint64_t rw_sync_hint_opposite_ready_sum;
-    uint64_t rw_window_cur_start;
-    uint64_t rw_window_cur_cas;
-    uint64_t rw_window_cur_target_cas;
-    uint64_t rw_window_cur_wrong_cas;
-    uint64_t rw_window_cur_gray_bp;
-    uint64_t rw_window_cur_stable_bp;
-    uint64_t rw_window_total_cycles;
-    uint64_t rw_window_total_cas;
-    uint64_t rw_window_total_target_cas;
-    uint64_t rw_window_total_wrong_cas;
-    uint64_t rw_window_total_gray_bp;
-    uint64_t rw_window_total_stable_bp;
-    uint64_t rw_window_count;
-    uint64_t rw_window_read_count;
-    uint64_t rw_window_write_count;
-    uint64_t rw_window_read_cycles;
-    uint64_t rw_window_write_cycles;
-    uint64_t rw_window_read_cas;
-    uint64_t rw_window_write_cas;
-    uint64_t rw_window_max_cycles;
-    uint64_t rw_window_max_cas;
-    uint8_t rw_window_cur_group;
-    void StartRwWindow(uint8_t group);
-    void FinishRwWindow(uint64_t end_time);
-    void TrackRwWindowCas(TransactionCmd cmd_type);
     float CalcBwByByte(uint64_t byte, unsigned cycle);
     WriteBuff *wb;
 //    Rmw *rmw;
@@ -460,31 +430,6 @@ public:
     bool in_write_group;
     uint8_t rk_grp_state;
     uint8_t real_rk_grp_state;
-    bool rw_sync_hint_valid;
-    uint8_t rw_sync_hint_group;
-    bool rw_sync_block_new_rw;
-    bool rw_sync_allow_new_cas;
-    bool rw_sync_gray;
-    bool rw_issue_valid;
-    uint8_t rw_issue_type;
-    bool rw_req_valid;
-    uint8_t rw_req_type;
-    bool lc_rw_met_valid;
-    uint8_t lc_rw_met_type;
-    bool global_rw_sync_valid;
-    uint8_t global_rw_sync_type;
-    unsigned pseudo_rw_conf_cnt;
-    unsigned mrd_rd_issue_gap;
-    unsigned mrd_wr_issue_gap;
-    bool mrd_switch_to_read;
-    bool mrd_switch_to_write;
-    unsigned mrd_peer_read_cnt;
-    unsigned mrd_peer_write_cnt;
-    bool mrd_peer_switch_to_read;
-    bool mrd_peer_switch_to_write;
-    bool mrd_bp_read_req;
-    bool mrd_bp_write_req;
-    unsigned mrd_wr_availability;
     map <unsigned, unsigned> BL_n;
     map <unsigned, unsigned> BL_n_min;
     map <unsigned, unsigned> BL_n_max;
@@ -558,7 +503,6 @@ private:
 public:
     uint64_t pre_req_time;          // time point for last cmd
     uint64_t pre_req_data_time;    // time point for last wdata 
-    uint64_t next_wdata_trans_time;
     uint64_t rd_met_abr_cnt;
     uint64_t rd_met_pbr_cnt;
     unsigned pbr_bank_num;
@@ -601,8 +545,6 @@ public:
     unsigned act_cmd_num;
     unsigned tout_high_pri;
     unsigned get_rdata_chunk_beats(const TRANS_MSG &msg) const;
-    void collect_ready_read_data();
-    void service_ready_read_data();
     unsigned GetRwRank(unsigned rank) {return (r_rank_cnt[rank] + w_rank_cnt[rank]);};
     vector <bool> has_wakeup;
     vector <bool> rank_has_cmd;
@@ -669,11 +611,13 @@ public:
     vector <unsigned> fg_hit_count;
     bool write_port_busy_this_cycle; // 用于单写端口仲裁
     uint32_t ecc_wb_cnt;
-    // 模式 1：用于映射 "内部读 Task ID" -> "回写上下文" 的字典
-    std::map<uint64_t, TRANS_MSG> ecc_wb_pending_rd;
+    std::unordered_map<uint64_t, TRANS_MSG> ecc_wb_pending_wr; // 用于 Mode 1：等待 Write 结束后触发 Read
     std::vector<Transaction *> ecc_wb_queue;  
     std::vector<Transaction *> ps_rd_queue;
     std::vector<std::pair<Transaction *, uint64_t>> delayed_ecc_wb_queue;  // 延迟结束的时间戳
+    std::unordered_set<uint64_t> ecc_checked_tasks; // 记录已经做过 ECC 判定的任务
+    std::unordered_set<uint64_t> tasks_need_ecc_wb; // 记录命中 WB_RATIO，真正需要回写的任务
+    std::unordered_map<uint64_t, uint64_t> task_ecc_release_time; // 记录任务的“释放时间”
     // 声明一个周期检查函数
     void update_ecc_wb_delay();
     Transaction* ps_rd_trans = nullptr;  // 用于挂起生成的巡检读命令
@@ -692,6 +636,38 @@ public:
 
     // 声明巡检检测函数
     void update_patrol_scrubbing();
+    // 新增：用于模拟 16B/cycle 消化速度的半拍状态机
+    bool wdata_half_beat_done = false;
+
+    uint8_t GetRwGroupTarget() const;
+    uint8_t GetRwGroupCurrent() const;
+    bool rw_sync_hint_valid;
+    uint8_t rw_sync_hint_group;
+    bool rw_sync_block_new_rw;
+    bool rw_sync_allow_new_cas;
+    bool rw_sync_gray;
+    bool rw_issue_valid;
+    uint8_t rw_issue_type;
+    bool rw_req_valid;
+    uint8_t rw_req_type;
+    bool lc_rw_met_valid;
+    uint8_t lc_rw_met_type;
+    bool global_rw_sync_valid;
+    uint8_t global_rw_sync_type;
+    unsigned global_rw_sync_same_cnt;
+    unsigned global_rw_sync_opposite_cnt;
+    unsigned pseudo_rw_conf_cnt;
+    unsigned mrd_rd_issue_gap;
+    unsigned mrd_wr_issue_gap;
+    bool mrd_switch_to_read;
+    bool mrd_switch_to_write;
+    unsigned mrd_peer_read_cnt;
+    unsigned mrd_peer_write_cnt;
+    bool mrd_peer_switch_to_read;
+    bool mrd_peer_switch_to_write;
+    bool mrd_bp_read_req;
+    bool mrd_bp_write_req;
+    unsigned mrd_wr_availability;
 };
 }
 #endif
