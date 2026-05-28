@@ -1,3 +1,17 @@
+/* $$$!!Warning: Huawei key information asset. No spread without permission.$$$ */
+/* CODEMARK:RKeR1B8WMAfemkt1tTDGp4eOEddgxKn4NOPmdw0w+6Q3n1pxgDEX+kGBiRV20e1NKuLwOh60qWwx
+7DOUvTqsDpJdC/G6ahMCQuRlwWqc+IGKquH6vaaGAGe1zSmcLn5FMd2VBk0upEP5xKZPTVuBjKnw
+SvZMzBtMrQ+w1lxbG5+EFWux51V2bvtZUTAAA+en/pM7ZB5Cy3u0JTs1VqxXwiXqvWUlNqzLkwVn
+Ku0GTtM1WM902dVDHRlBZCTa3lPlAEOAF0wpKIq4SmjyiuaiKd8/3TrwU0MRXX4SzMmihr9bAWkH
+z8a4Ah46TttGgH3S# */
+/* $$$!!Warning: Deleting or modifying the preceding information is prohibited.$$$ */
+/*
+* Copyright @ Huawei Technologies Co., Ltd. 2019-2029. All rights reserved.
+* Description: LPMemorySystemTop.cpp
+* Author: l00434636
+* Create: 2020-10-27
+*/
+
 #include <errno.h>
 #include <sstream> //stringstream
 #include <stdlib.h> // getenv()
@@ -56,6 +70,18 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     top_rdata_active = false;
     top_rdata_task = 0;
     top_rdata_remain = 0;
+    global_pseudo_rw_conf_valid = false;
+    global_pseudo_rw_conf_type = DATA_READ;
+    global_pseudo_rw_conf_cnt = 0;
+    last_global_rw_valid = false;
+    last_global_rw_type = DATA_READ;
+    active_global_rw_valid = false;
+    active_global_rw_type = DATA_READ;
+    global_rw_stable_cnt = 0;
+    global_rw_switch_hold_cnt = 0;
+    global_rw_override_cnt = 0;
+    global_rw_override_type_valid = false;
+    global_rw_override_type = DATA_READ;
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -945,10 +971,21 @@ void LPMemorySystemTop::init_callback_proxies() {
 bool LPMemorySystemTop::handle_read_data(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    // 如果 Top 层 FIFO 满了，触发底层 DMC 的反压 (rp_fifo)
     if (top_rdata_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false; 
+
+    if (RDATA_MERGE_EN) {
+        bool task_exists = false;
+        for (const auto &pkt : top_rdata_fifo) {
+            if (pkt.task == task) {
+                task_exists = true;
+                break;
+            }
+        }
+        unsigned chunk_beats = MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8);
+        if (chunk_beats == 0) chunk_beats = 1;
+        if (!task_exists && top_rdata_fifo.size() + chunk_beats > TOP_RESP_FIFO_DEPTH) return false;
+    }
     
-    // 没满就照单全收，底层 DMC 直接放行
     top_rdata_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
@@ -1049,31 +1086,207 @@ void LPMemorySystemTop::update() {
     }
 
     if (DMC_RW_SYNC_EN && NUM_CHANS >= 2) {
-        // 第一步：先不执行 update，收集所有通道当前的读写切换灰度状态
-        bool global_rw_switch_gray = false; 
         for (size_t i = 0; i < NUM_CHANS; i++) {
-            if (channels[i]->memoryController->IsRWGray()) {
-                global_rw_switch_gray = true;
-                break;
+            unsigned peer_read_cnt = 0;
+            unsigned peer_write_cnt = 0;
+            bool peer_switch_to_read = false;
+            bool peer_switch_to_write = false;
+            for (size_t j = 0; j < NUM_CHANS; j++) {
+                if (i == j) continue;
+                MemoryController *other = channels[j]->memoryController;
+                peer_read_cnt += other->Read_Cnt();
+                peer_write_cnt += other->Write_Cnt();
+                peer_switch_to_read |= other->GetMrdSwitchToRead();
+                peer_switch_to_write |= other->GetMrdSwitchToWrite();
             }
+            channels[i]->memoryController->SetMrdPeerState(peer_read_cnt, peer_write_cnt, peer_switch_to_read, peer_switch_to_write);
         }
-        // 第二步：Master 只接收灰度信号（决定它自己的 LC 是否要拦截），不接收外部的 Target Group
-        channels[0]->memoryController->SetRwSyncHint(false, NO_GROUP, global_rw_switch_gray);
-        // channels[0]->memoryController->SetRwSyncHint(false, NO_GROUP, false);
-        channels[0]->update();
-        MemoryController *master = channels[0]->memoryController;
-        for (size_t i = 1; i < NUM_CHANS; i++) {
-            channels[i]->memoryController->SetRwSyncHint(true,
-                    master->GetRwGroupTarget(),
-                    global_rw_switch_gray);
-                    // false);
+
+        bool pending_read = false;
+        bool pending_write = false;
+        bool issue_read = false;
+        bool issue_write = false;
+        bool req_read = false;
+        bool req_write = false;
+        bool ready_read = false;
+        bool ready_write = false;
+        std::vector<bool> mc_active_read(NUM_CHANS, false);
+        std::vector<bool> mc_active_write(NUM_CHANS, false);
+        std::vector<bool> mc_ready_read(NUM_CHANS, false);
+        std::vector<bool> mc_ready_write(NUM_CHANS, false);
+        unsigned active_read_cnt = 0;
+        unsigned active_write_cnt = 0;
+        unsigned ready_read_cnt = 0;
+        unsigned ready_write_cnt = 0;
+        unsigned queue_read_cnt = 0;
+        unsigned queue_write_cnt = 0;
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            MemoryController *mc = channels[i]->memoryController;
+            queue_read_cnt += mc->GetRwQueueCnt(DATA_READ);
+            queue_write_cnt += mc->GetRwQueueCnt(DATA_WRITE);
+            if (mc->HasPendingDfiRw()) {
+                if (mc->GetPendingDfiRwType() == DATA_READ) {
+                    pending_read = true;
+                    mc_active_read[i] = true;
+                } else {
+                    pending_write = true;
+                    mc_active_write[i] = true;
+                }
+            }
+            if (mc->HasRwIssue()) {
+                if (mc->GetRwIssueType() == DATA_READ) {
+                    issue_read = true;
+                    mc_active_read[i] = true;
+                } else {
+                    issue_write = true;
+                    mc_active_write[i] = true;
+                }
+            }
+            if (mc->HasRwReq()) {
+                if (mc->GetRwReqType() == DATA_READ) {
+                    req_read = true;
+                    mc_active_read[i] = true;
+                } else {
+                    req_write = true;
+                    mc_active_write[i] = true;
+                }
+            }
+            mc_ready_read[i] = mc->HasReadyCasType(DATA_READ);
+            mc_ready_write[i] = mc->HasReadyCasType(DATA_WRITE);
+            ready_read |= mc_ready_read[i];
+            ready_write |= mc_ready_write[i];
+            if (mc_active_read[i]) active_read_cnt ++;
+            if (mc_active_write[i]) active_write_cnt ++;
+            if (mc_ready_read[i]) ready_read_cnt ++;
+            if (mc_ready_write[i]) ready_write_cnt ++;
+        }
+        bool active_read = pending_read || issue_read || req_read;
+        bool active_write = pending_write || issue_write || req_write;
+        bool observed_rw_valid = active_read || active_write || ready_read || ready_write;
+        uint8_t observed_rw_type = active_global_rw_type;
+        bool force_switch_to_read = active_global_rw_valid && active_global_rw_type == DATA_WRITE
+                && global_rw_stable_cnt >= 384 && (active_read || ready_read);
+        bool force_switch_to_write = active_global_rw_valid && active_global_rw_type == DATA_READ
+                && global_rw_stable_cnt >= 384 && (active_write || ready_write);
+        if (force_switch_to_read || force_switch_to_write) {
+            observed_rw_type = force_switch_to_read ? DATA_READ : DATA_WRITE;
+        } else if (global_rw_switch_hold_cnt > 0 && active_global_rw_valid) {
+            observed_rw_type = active_global_rw_type;
+        } else if (active_global_rw_valid && ((active_global_rw_type == DATA_READ && (active_read || ready_read))
+                || (active_global_rw_type == DATA_WRITE && (active_write || ready_write)))) {
+            observed_rw_type = active_global_rw_type;
+        } else if (active_read && active_write && active_global_rw_valid) {
+            observed_rw_type = active_global_rw_type;
+        } else if (active_read || active_write) {
+            observed_rw_type = (active_read && (!active_write || active_global_rw_type == DATA_READ)) ? DATA_READ : DATA_WRITE;
+        } else if (ready_read && ready_write && active_global_rw_valid) {
+            observed_rw_type = active_global_rw_type;
+        } else if (ready_read || ready_write) {
+            observed_rw_type = ready_read ? DATA_READ : DATA_WRITE;
+        } else {
+            observed_rw_type = DATA_READ;
+        }
+        if (observed_rw_valid && active_global_rw_valid && observed_rw_type == active_global_rw_type) {
+            global_rw_stable_cnt ++;
+        } else {
+            global_rw_stable_cnt = 0;
+        }
+        if (observed_rw_valid && last_global_rw_valid && observed_rw_type != last_global_rw_type) {
+            global_pseudo_rw_conf_valid = true;
+            global_pseudo_rw_conf_type = observed_rw_type;
+            global_pseudo_rw_conf_cnt = 3;
+            global_rw_switch_hold_cnt = 8;
+        } else if (global_pseudo_rw_conf_cnt > 0) {
+            global_pseudo_rw_conf_cnt --;
+            global_pseudo_rw_conf_valid = global_pseudo_rw_conf_cnt > 0;
+            if (global_rw_switch_hold_cnt > 0) global_rw_switch_hold_cnt --;
+        } else {
+            global_pseudo_rw_conf_valid = false;
+        }
+        bool next_same_dir = (observed_rw_type == DATA_READ)
+                ? ((active_read_cnt + ready_read_cnt) >= 2) : ((active_write_cnt + ready_write_cnt) >= 2);
+        if (global_pseudo_rw_conf_valid && next_same_dir) {
+            unsigned same_queue = observed_rw_type == DATA_READ ? queue_read_cnt : queue_write_cnt;
+            unsigned opposite_queue = observed_rw_type == DATA_READ ? queue_write_cnt : queue_read_cnt;
+            unsigned override_window = 256;
+            if (same_queue >= opposite_queue + 8) override_window = 384;
+            else if (same_queue + 8 < opposite_queue) override_window = 192;
+            if (global_rw_override_type_valid && global_rw_override_type != observed_rw_type) override_window += 96;
+            global_rw_override_cnt = override_window;
+            global_rw_override_type_valid = true;
+            global_rw_override_type = observed_rw_type;
+        } else if (global_rw_override_cnt > 0) {
+            unsigned override_same_queue = global_rw_override_type == DATA_READ ? queue_read_cnt : queue_write_cnt;
+            unsigned override_opposite_queue = global_rw_override_type == DATA_READ ? queue_write_cnt : queue_read_cnt;
+            if (override_same_queue == 0 && override_opposite_queue > 0) global_rw_override_cnt = 1;
+            global_rw_override_cnt --;
+        } else {
+            global_rw_override_type_valid = false;
+        }
+        bool global_rw_valid = global_rw_override_cnt > 0;
+        uint8_t global_rw_type = global_rw_override_type_valid ? global_rw_override_type : observed_rw_type;
+        if (observed_rw_valid) {
+            last_global_rw_valid = true;
+            last_global_rw_type = observed_rw_type;
+            active_global_rw_valid = true;
+            active_global_rw_type = observed_rw_type;
+        } else if (global_rw_stable_cnt > 0) {
+            global_rw_stable_cnt --;
+        } else {
+            active_global_rw_valid = false;
+        }
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            channels[i]->memoryController->SetGlobalRwSyncDirection(global_rw_valid, global_rw_type);
+            bool other_same_dir = false;
+            bool other_same_dir_active = false;
+            for (size_t j = 0; j < NUM_CHANS; j++) {
+                if (i == j) continue;
+                other_same_dir_active |= (global_rw_type == DATA_READ) ? mc_active_read[j] : mc_active_write[j];
+                other_same_dir |= other_same_dir_active || ((global_rw_type == DATA_READ) ? mc_ready_read[j] : mc_ready_write[j]);
+            }
+            bool self_opposite_ready = (global_rw_type == DATA_READ) ? mc_ready_write[i] : mc_ready_read[i];
+            channels[i]->memoryController->SetPseudoRwSyncHint(!global_rw_valid && other_same_dir && self_opposite_ready, global_rw_type, 2);
+        }
+
+        for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->update();
+        }
+
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            MemoryController *mc = channels[i]->memoryController;
+            bool other_read_req = false;
+            bool other_write_req = false;
+            for (size_t j = 0; j < NUM_CHANS; j++) {
+                if (i == j) continue;
+                MemoryController *other = channels[j]->memoryController;
+                if (other->HasRwReq()) {
+                    if (other->GetRwReqType() == DATA_READ) other_read_req = true;
+                    else other_write_req = true;
+                }
+            }
+            bool pseudo_read_conflict = other_read_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_WRITE;
+            bool pseudo_write_conflict = other_write_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_READ;
+            if ((pseudo_read_conflict || pseudo_write_conflict) && !global_pseudo_rw_conf_valid && !global_rw_override_cnt) {
+                uint8_t pseudo_rw_type = pseudo_read_conflict ? DATA_READ : DATA_WRITE;
+                mc->SetPseudoRwSyncHint(true, pseudo_rw_type, 2);
+            }
         }
     } else {
         for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->memoryController->SetRwSyncHint(false, NO_GROUP, false);
+            channels[i]->memoryController->SetGlobalRwSyncDirection(false, DATA_READ);
             channels[i]->update();
         }
+        global_pseudo_rw_conf_valid = false;
+        global_pseudo_rw_conf_cnt = 0;
+        last_global_rw_valid = false;
+        active_global_rw_valid = false;
+        active_global_rw_type = DATA_READ;
+        global_rw_stable_cnt = 0;
+        global_rw_switch_hold_cnt = 0;
+        global_rw_override_cnt = 0;
+        global_rw_override_type_valid = false;
+        global_rw_override_type = DATA_READ;
     }
 
     if (RMW_ENABLE) {
@@ -1092,16 +1305,32 @@ void LPMemorySystemTop::update() {
 
     // Top 层的串行化向上游发送逻辑 (仲裁与汇聚吐出)
     // 1. 吐出 Read Data
+    bool top_rdata_ready_to_send = true;
     if (!top_rdata_fifo.empty()) {
         size_t idx = 0;
         if (!top_rdata_active) {
-            top_rdata_task = top_rdata_fifo.front().task;
-            top_rdata_remain = MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8);
-            top_rdata_active = true;
+            top_rdata_remain = RDATA_MERGE_EN ? (MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8)) : 1;
+            if (top_rdata_remain == 0) top_rdata_remain = 1;
+            for (size_t cand = 0; cand < top_rdata_fifo.size(); cand++) {
+                unsigned ready_beats = 0;
+                uint64_t cand_task = top_rdata_fifo[cand].task;
+                for (const auto &pkt : top_rdata_fifo) {
+                    if (pkt.task == cand_task) ready_beats++;
+                }
+                if (ready_beats >= top_rdata_remain) {
+                    top_rdata_task = cand_task;
+                    idx = cand;
+                    top_rdata_active = true;
+                    break;
+                }
+            }
+            if (!top_rdata_active) {
+                top_rdata_ready_to_send = false;
+            }
         } else {
             while (idx < top_rdata_fifo.size() && top_rdata_fifo[idx].task != top_rdata_task) idx++;
         }
-        if (idx < top_rdata_fifo.size()) {
+        if (top_rdata_ready_to_send && idx < top_rdata_fifo.size()) {
             TopRespPacket pkt = top_rdata_fifo[idx];
             if (read_cb == NULL || (*read_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
                 top_rdata_fifo.erase(top_rdata_fifo.begin() + idx);
