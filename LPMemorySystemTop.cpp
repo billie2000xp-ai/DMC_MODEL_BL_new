@@ -1104,88 +1104,59 @@ void LPMemorySystemTop::update() {
 
         bool pending_read = false;
         bool pending_write = false;
-        bool issue_read = false;
-        bool issue_write = false;
         bool req_read = false;
         bool req_write = false;
-        bool ready_read = false;
-        bool ready_write = false;
-        std::vector<bool> mc_active_read(NUM_CHANS, false);
-        std::vector<bool> mc_active_write(NUM_CHANS, false);
-        std::vector<bool> mc_ready_read(NUM_CHANS, false);
-        std::vector<bool> mc_ready_write(NUM_CHANS, false);
-        unsigned active_read_cnt = 0;
-        unsigned active_write_cnt = 0;
-        unsigned ready_read_cnt = 0;
-        unsigned ready_write_cnt = 0;
+        std::vector<bool> mc_req_read(NUM_CHANS, false);
+        std::vector<bool> mc_req_write(NUM_CHANS, false);
+        std::vector<bool> mc_met_read(NUM_CHANS, false);
+        std::vector<bool> mc_met_write(NUM_CHANS, false);
+        std::vector<unsigned> mc_queue_read(NUM_CHANS, 0);
+        std::vector<unsigned> mc_queue_write(NUM_CHANS, 0);
         unsigned queue_read_cnt = 0;
         unsigned queue_write_cnt = 0;
         for (size_t i = 0; i < NUM_CHANS; i++) {
             MemoryController *mc = channels[i]->memoryController;
-            queue_read_cnt += mc->GetRwQueueCnt(DATA_READ);
-            queue_write_cnt += mc->GetRwQueueCnt(DATA_WRITE);
+            mc_queue_read[i] = mc->GetRwQueueCnt(DATA_READ);
+            mc_queue_write[i] = mc->GetRwQueueCnt(DATA_WRITE);
+            queue_read_cnt += mc_queue_read[i];
+            queue_write_cnt += mc_queue_write[i];
             if (mc->HasPendingDfiRw()) {
                 if (mc->GetPendingDfiRwType() == DATA_READ) {
                     pending_read = true;
-                    mc_active_read[i] = true;
                 } else {
                     pending_write = true;
-                    mc_active_write[i] = true;
-                }
-            }
-            if (mc->HasRwIssue()) {
-                if (mc->GetRwIssueType() == DATA_READ) {
-                    issue_read = true;
-                    mc_active_read[i] = true;
-                } else {
-                    issue_write = true;
-                    mc_active_write[i] = true;
                 }
             }
             if (mc->HasRwReq()) {
                 if (mc->GetRwReqType() == DATA_READ) {
                     req_read = true;
-                    mc_active_read[i] = true;
+                    mc_req_read[i] = true;
                 } else {
                     req_write = true;
-                    mc_active_write[i] = true;
+                    mc_req_write[i] = true;
                 }
             }
-            mc_ready_read[i] = mc->HasReadyCasType(DATA_READ);
-            mc_ready_write[i] = mc->HasReadyCasType(DATA_WRITE);
-            ready_read |= mc_ready_read[i];
-            ready_write |= mc_ready_write[i];
-            if (mc_active_read[i]) active_read_cnt ++;
-            if (mc_active_write[i]) active_write_cnt ++;
-            if (mc_ready_read[i]) ready_read_cnt ++;
-            if (mc_ready_write[i]) ready_write_cnt ++;
+            if (mc->HasLcRwMet()) {
+                if (mc->GetLcRwMetType() == DATA_READ) mc_met_read[i] = true;
+                else mc_met_write[i] = true;
+            }
         }
-        bool active_read = pending_read || issue_read || req_read;
-        bool active_write = pending_write || issue_write || req_write;
-        bool observed_rw_valid = active_read || active_write || ready_read || ready_write;
+        bool observed_rw_valid = pending_read || pending_write || req_read || req_write;
+        bool observed_read = pending_read || req_read;
+        bool observed_write = pending_write || req_write;
+        bool met_read = false;
+        bool met_write = false;
+        for (size_t i = 0; i < NUM_CHANS; i++) {
+            met_read |= mc_met_read[i];
+            met_write |= mc_met_write[i];
+        }
         uint8_t observed_rw_type = active_global_rw_type;
-        bool force_switch_to_read = active_global_rw_valid && active_global_rw_type == DATA_WRITE
-                && global_rw_stable_cnt >= 384 && (active_read || ready_read);
-        bool force_switch_to_write = active_global_rw_valid && active_global_rw_type == DATA_READ
-                && global_rw_stable_cnt >= 384 && (active_write || ready_write);
-        if (force_switch_to_read || force_switch_to_write) {
-            observed_rw_type = force_switch_to_read ? DATA_READ : DATA_WRITE;
-        } else if (global_rw_switch_hold_cnt > 0 && active_global_rw_valid) {
-            observed_rw_type = active_global_rw_type;
-        } else if (active_global_rw_valid && ((active_global_rw_type == DATA_READ && (active_read || ready_read))
-                || (active_global_rw_type == DATA_WRITE && (active_write || ready_write)))) {
-            observed_rw_type = active_global_rw_type;
-        } else if (active_read && active_write && active_global_rw_valid) {
-            observed_rw_type = active_global_rw_type;
-        } else if (active_read || active_write) {
-            observed_rw_type = (active_read && (!active_write || active_global_rw_type == DATA_READ)) ? DATA_READ : DATA_WRITE;
-        } else if (ready_read && ready_write && active_global_rw_valid) {
-            observed_rw_type = active_global_rw_type;
-        } else if (ready_read || ready_write) {
-            observed_rw_type = ready_read ? DATA_READ : DATA_WRITE;
-        } else {
-            observed_rw_type = DATA_READ;
-        }
+        if (observed_read && observed_write && active_global_rw_valid) observed_rw_type = active_global_rw_type;
+        else if (observed_read && observed_write) observed_rw_type = DATA_READ;
+        else if (observed_read) observed_rw_type = DATA_READ;
+        else if (observed_write) observed_rw_type = DATA_WRITE;
+        else if (met_read && !met_write) observed_rw_type = DATA_READ;
+        else if (met_write && !met_read) observed_rw_type = DATA_WRITE;
         if (observed_rw_valid && active_global_rw_valid && observed_rw_type == active_global_rw_type) {
             global_rw_stable_cnt ++;
         } else {
@@ -1195,36 +1166,31 @@ void LPMemorySystemTop::update() {
             global_pseudo_rw_conf_valid = true;
             global_pseudo_rw_conf_type = observed_rw_type;
             global_pseudo_rw_conf_cnt = 3;
-            global_rw_switch_hold_cnt = 8;
         } else if (global_pseudo_rw_conf_cnt > 0) {
             global_pseudo_rw_conf_cnt --;
             global_pseudo_rw_conf_valid = global_pseudo_rw_conf_cnt > 0;
-            if (global_rw_switch_hold_cnt > 0) global_rw_switch_hold_cnt --;
         } else {
             global_pseudo_rw_conf_valid = false;
         }
-        bool next_same_dir = (observed_rw_type == DATA_READ)
-                ? ((active_read_cnt + ready_read_cnt) >= 2) : ((active_write_cnt + ready_write_cnt) >= 2);
-        if (global_pseudo_rw_conf_valid && next_same_dir) {
-            unsigned same_queue = observed_rw_type == DATA_READ ? queue_read_cnt : queue_write_cnt;
-            unsigned opposite_queue = observed_rw_type == DATA_READ ? queue_write_cnt : queue_read_cnt;
-            unsigned override_window = 256;
-            if (same_queue >= opposite_queue + 8) override_window = 384;
-            else if (same_queue + 8 < opposite_queue) override_window = 192;
-            if (global_rw_override_type_valid && global_rw_override_type != observed_rw_type) override_window += 96;
-            global_rw_override_cnt = override_window;
-            global_rw_override_type_valid = true;
-            global_rw_override_type = observed_rw_type;
-        } else if (global_rw_override_cnt > 0) {
-            unsigned override_same_queue = global_rw_override_type == DATA_READ ? queue_read_cnt : queue_write_cnt;
-            unsigned override_opposite_queue = global_rw_override_type == DATA_READ ? queue_write_cnt : queue_read_cnt;
-            if (override_same_queue == 0 && override_opposite_queue > 0) global_rw_override_cnt = 1;
-            global_rw_override_cnt --;
-        } else {
-            global_rw_override_type_valid = false;
-        }
-        bool global_rw_valid = global_rw_override_cnt > 0;
-        uint8_t global_rw_type = global_rw_override_type_valid ? global_rw_override_type : observed_rw_type;
+        bool bubble_read = active_global_rw_valid && active_global_rw_type == DATA_READ && !req_read && !pending_read && queue_read_cnt <= 4;
+        bool bubble_write = active_global_rw_valid && active_global_rw_type == DATA_WRITE && !req_write && !pending_write && queue_write_cnt <= 4;
+        if (bubble_read || bubble_write) global_rw_switch_hold_cnt ++;
+        else global_rw_switch_hold_cnt = 0;
+        bool sparse_read = active_global_rw_valid && active_global_rw_type == DATA_READ && queue_read_cnt <= 4 && queue_write_cnt >= queue_read_cnt + 12;
+        bool sparse_write = active_global_rw_valid && active_global_rw_type == DATA_WRITE && queue_write_cnt <= 4 && queue_read_cnt >= queue_write_cnt + 12;
+        bool switch_to_write = active_global_rw_valid && active_global_rw_type == DATA_READ
+                && queue_write_cnt >= 16 && (global_rw_switch_hold_cnt >= 8 || sparse_read);
+        bool switch_to_read = active_global_rw_valid && active_global_rw_type == DATA_WRITE
+                && queue_read_cnt >= 16 && (global_rw_switch_hold_cnt >= 8 || sparse_write);
+        bool same_dir_enough = (observed_rw_type == DATA_READ) ? queue_read_cnt >= 4 : queue_write_cnt >= 4;
+        bool active_same_queue = active_global_rw_valid && ((active_global_rw_type == DATA_READ && queue_read_cnt > 2)
+                || (active_global_rw_type == DATA_WRITE && queue_write_cnt > 2));
+        bool active_switching = (active_global_rw_type == DATA_READ && switch_to_write)
+                || (active_global_rw_type == DATA_WRITE && switch_to_read);
+        bool hold_active_dir = active_same_queue && !active_switching;
+        bool global_rw_valid = global_pseudo_rw_conf_valid || hold_active_dir || (observed_rw_valid && same_dir_enough);
+        uint8_t global_rw_type = global_pseudo_rw_conf_valid ? global_pseudo_rw_conf_type
+                : (hold_active_dir ? active_global_rw_type : observed_rw_type);
         if (observed_rw_valid) {
             last_global_rw_valid = true;
             last_global_rw_type = observed_rw_type;
@@ -1237,15 +1203,29 @@ void LPMemorySystemTop::update() {
         }
         for (size_t i = 0; i < NUM_CHANS; i++) {
             channels[i]->memoryController->SetGlobalRwSyncDirection(global_rw_valid, global_rw_type);
-            bool other_same_dir = false;
-            bool other_same_dir_active = false;
+            channels[i]->memoryController->SetGlobalRwSyncQueueState(
+                    active_global_rw_type == DATA_READ ? mc_queue_read[i] : mc_queue_write[i],
+                    active_global_rw_type == DATA_READ ? mc_queue_write[i] : mc_queue_read[i]);
+            bool hint_valid = false;
+            uint8_t hint_type = DATA_READ;
             for (size_t j = 0; j < NUM_CHANS; j++) {
                 if (i == j) continue;
-                other_same_dir_active |= (global_rw_type == DATA_READ) ? mc_active_read[j] : mc_active_write[j];
-                other_same_dir |= other_same_dir_active || ((global_rw_type == DATA_READ) ? mc_ready_read[j] : mc_ready_write[j]);
+                if ((mc_req_read[j] || mc_met_read[j]) && mc_met_write[i]) {
+                    hint_valid = true;
+                    hint_type = DATA_READ;
+                } else if ((mc_req_write[j] || mc_met_write[j]) && mc_met_read[i]) {
+                    hint_valid = true;
+                    hint_type = DATA_WRITE;
+                }
             }
-            bool self_opposite_ready = (global_rw_type == DATA_READ) ? mc_ready_write[i] : mc_ready_read[i];
-            channels[i]->memoryController->SetPseudoRwSyncHint(!global_rw_valid && other_same_dir && self_opposite_ready, global_rw_type, 2);
+            if (!hint_valid && switch_to_write && (mc_req_read[i] || mc_met_read[i]) && mc_queue_write[i] > 0) {
+                hint_valid = true;
+                hint_type = DATA_WRITE;
+            } else if (!hint_valid && switch_to_read && (mc_req_write[i] || mc_met_write[i]) && mc_queue_read[i] > 0) {
+                hint_valid = true;
+                hint_type = DATA_READ;
+            }
+            channels[i]->memoryController->SetPseudoRwSyncHint(hint_valid, hint_type, hint_valid ? 3 : 0);
         }
 
         for (size_t i = 0; i < NUM_CHANS; i++) {
@@ -1266,7 +1246,7 @@ void LPMemorySystemTop::update() {
             }
             bool pseudo_read_conflict = other_read_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_WRITE;
             bool pseudo_write_conflict = other_write_req && mc->HasLcRwMet() && mc->GetLcRwMetType() == DATA_READ;
-            if ((pseudo_read_conflict || pseudo_write_conflict) && !global_pseudo_rw_conf_valid && !global_rw_override_cnt) {
+            if ((pseudo_read_conflict || pseudo_write_conflict) && !global_pseudo_rw_conf_valid) {
                 uint8_t pseudo_rw_type = pseudo_read_conflict ? DATA_READ : DATA_WRITE;
                 mc->SetPseudoRwSyncHint(true, pseudo_rw_type, 2);
             }
