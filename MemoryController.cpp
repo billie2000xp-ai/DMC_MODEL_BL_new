@@ -55,6 +55,13 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     rw_switch_cnt = 0;
     r2w_switch_cnt = 0;
     w2r_switch_cnt = 0;
+    rw_sync_check_cnt = 0;
+    rw_sync_global_bp_cnt = 0;
+    rw_sync_pseudo_bp_cnt = 0;
+    rw_sync_read_block_write_cnt = 0;
+    rw_sync_write_block_read_cnt = 0;
+    rw_sync_read_block_read_cnt = 0;
+    rw_sync_write_block_write_cnt = 0;
     rank_switch_cnt = 0;
     sid_switch_cnt = 0;
     pbr_overall_cnt = 0;
@@ -9178,7 +9185,11 @@ void MemoryController::lc(Transaction *t) {
 
     if (DMC_RW_SYNC_EN && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
+        rw_sync_check_cnt ++;
         if (global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
+            rw_sync_global_bp_cnt ++;
+            if (global_rw_sync_type == DATA_READ) rw_sync_read_block_write_cnt ++;
+            else rw_sync_write_block_read_cnt ++;
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir. task="
                         <<t->task<<", trans_type="<<t->transactionType
@@ -9187,6 +9198,11 @@ void MemoryController::lc(Transaction *t) {
             return;
         }
         if (rw_sync_hint_valid && t->transactionType != rw_sync_hint_group) {
+            rw_sync_pseudo_bp_cnt ++;
+            if (rw_sync_hint_group == DATA_READ && t->transactionType == DATA_WRITE) rw_sync_read_block_write_cnt ++;
+            else if (rw_sync_hint_group == DATA_WRITE && t->transactionType == DATA_READ) rw_sync_write_block_read_cnt ++;
+            else if (rw_sync_hint_group == DATA_READ) rw_sync_read_block_read_cnt ++;
+            else rw_sync_write_block_write_cnt ++;
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir. task="
                         <<t->task<<", trans_type="<<t->transactionType
