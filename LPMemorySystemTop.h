@@ -1,3 +1,10 @@
+/*
+* Copyright @ Huawei Technologies Co., Ltd. 2019-2029. All rights reserved.
+* Description: LPMemorySystemTop.h
+* Author: l00434636
+* Create: 2020-10-27
+*/
+
 #ifndef _LPDDR_LPMEMORYSYSTEMTOP_H_
 #define _LPDDR_LPMEMORYSYSTEMTOP_H_
 
@@ -136,6 +143,18 @@ private:
     vector<TransactionCompleteCB *> proxy_write_cbs;
     vector<TransactionCompleteCB *> proxy_read_done_cbs;
     vector<TransactionCompleteCB *> proxy_cmd_cbs;
+    bool global_pseudo_rw_conf_valid;
+    uint8_t global_pseudo_rw_conf_type;
+    unsigned global_pseudo_rw_conf_cnt;
+    bool last_global_rw_valid;
+    uint8_t last_global_rw_type;
+    bool active_global_rw_valid;
+    uint8_t active_global_rw_type;
+    unsigned global_rw_stable_cnt;
+    unsigned global_rw_switch_hold_cnt;
+    unsigned global_rw_override_cnt;
+    bool global_rw_override_type_valid;
+    uint8_t global_rw_override_type;
 
     void command_check(const hha_command &c);
     void wdata_check(uint64_t task, uint8_t channel);
