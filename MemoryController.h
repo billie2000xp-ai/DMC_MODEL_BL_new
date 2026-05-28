@@ -297,6 +297,13 @@ public:
     unsigned rw_switch_cnt;
     unsigned r2w_switch_cnt;
     unsigned w2r_switch_cnt;
+    uint64_t rw_sync_check_cnt;
+    uint64_t rw_sync_global_bp_cnt;
+    uint64_t rw_sync_pseudo_bp_cnt;
+    uint64_t rw_sync_read_block_write_cnt;
+    uint64_t rw_sync_write_block_read_cnt;
+    uint64_t rw_sync_read_block_read_cnt;
+    uint64_t rw_sync_write_block_write_cnt;
     unsigned rank_switch_cnt;
     unsigned sid_switch_cnt;
     unsigned dly_ex2000_cnt;
