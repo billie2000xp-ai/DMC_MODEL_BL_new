@@ -22,7 +22,7 @@ class MemorySystem : public SimulatorObject {
     vector <ofstream> dram_log;
 public:
     //functions
-    MemorySystem(unsigned id,unsigned _dmc_id,ostream &DDRSim_log_,string LogPath);
+    MemorySystem(unsigned id,unsigned _dmc_id,string log_sufffix,ostream &DDRSim_log_,string LogPath);
     virtual ~MemorySystem();
     void update();
     void communicate();
@@ -31,6 +31,7 @@ public:
     bool addTransaction(bool isWrite, uint64_t addr);
     void noc_read_inform(bool fast_wakeup_rank0, bool fast_wakeup_rank1, bool bus_rempty);
     bool addData(uint32_t *data ,uint64_t id, bool ecc_flag);
+    bool addWriteDataPending(uint64_t task, unsigned remaining_beats, bool ecc_flag = false);
     bool WillAcceptTransaction();
     void RegisterCallbacks(Callback_t *readData, Callback_t *writeDone, Callback_t *readDone, Callback_t *cmdDone);
     void check_bank(uint32_t *dmc_2up_bank, uint32_t rank, uint32_t type);
@@ -38,6 +39,8 @@ public:
     uint8_t get_occ();
     uint32_t GetTransactionLen();
     uint32_t getTransQueSize(bool isRd);
+    bool hasPendingWork() const;
+    void flushWriteMergeBuffer();
     void dfs_backpress(bool backpress);
 //    void dfs_backpress(bool backpress) {memoryController->dfs_backpress(backpress);};
     //fields
@@ -51,6 +54,7 @@ public:
     Callback_t* CmdResp;
     unsigned dmc_id;
     unsigned systemID;
+    string log_suffix;
     string log_path;
     //TODO: make this a functor as well?
     std::map<uint64_t,write_msg>write_map;
@@ -184,58 +188,6 @@ public:
 //    void trans_check(Transaction *trans);
 
 private:
-    static const unsigned WRITE_MERGE_BUFFER_DEPTH = 16;
-
-    struct BufferedWriteEntry {
-        Transaction *first_trans;
-        Transaction *second_trans;
-        bool has_second;
-        bool force_single;
-
-        BufferedWriteEntry() {
-            first_trans = NULL;
-            second_trans = NULL;
-            has_second = false;
-            force_single = false;
-        }
-    };
-
-    struct WriteDataRoute {
-        uint64_t internal_task;
-        unsigned remaining_beats;
-        uint64_t resp_task;
-        unsigned resp_channel;
-        bool has_resp;
-
-        WriteDataRoute() {
-            internal_task = 0;
-            remaining_beats = 0;
-            resp_task = 0;
-            resp_channel = 0;
-            has_resp = false;
-        }
-    };
-
-    struct InternalWriteRespContext {
-        uint64_t external_task;
-        unsigned upstream_channel;
-
-        InternalWriteRespContext() {
-            external_task = 0;
-            upstream_channel = 0;
-        }
-    };
-
-    struct PendingWriteResp {
-        uint64_t external_task;
-        unsigned upstream_channel;
-
-        PendingWriteResp() {
-            external_task = 0;
-            upstream_channel = 0;
-        }
-    };
-
     vector <uint32_t> prePdTime;
     vector <uint32_t> preAsrefTime;
     vector <uint32_t> preSrpdTime;
@@ -243,6 +195,42 @@ private:
     vector <bus_state> BusStateAsync;
     vector <vector<unsigned>> pre_abr_cnt;
     vector <unsigned> pre_pbr_cnt;
+
+    struct WriteMergeEntry {
+        Transaction *first_trans;
+        Transaction *second_trans;
+        unsigned first_data_ready_cnt;
+        unsigned second_data_ready_cnt;
+        bool has_second;
+        bool paired_tail;
+        bool task_allocated;
+        uint64_t merged_task;
+        uint64_t enqueue_time;
+        uint8_t upstream_channel;
+        WriteMergeEntry();
+    };
+
+    struct PendingWriteMergeResp {
+        uint64_t task;
+        uint8_t channel;
+        uint64_t wait_data_task;
+        PendingWriteMergeResp(uint64_t task_, uint8_t channel_, uint64_t wait_data_task_ = 0xffffffffffffffffull);
+    };
+
+    struct PendingWriteMergeData {
+        uint64_t task;
+        unsigned remaining_beats;
+        bool ecc_flag;
+        PendingWriteMergeData(uint64_t task_, unsigned remaining_beats_, bool ecc_flag_ = false);
+    };
+
+    struct WriteMergeDataRemap {
+        uint64_t src_task;
+        uint64_t dst_task;
+        unsigned remaining_beats;
+        WriteMergeDataRemap(uint64_t src_task_, uint64_t dst_task_, unsigned remaining_beats_);
+    };
+
     Callback_t *upstreamReadData;
     Callback_t *upstreamWriteResp;
     Callback_t *upstreamReadResp;
@@ -251,12 +239,22 @@ private:
     Callback_t *internalWriteRespCb;
     Callback_t *internalReadRespCb;
     Callback_t *internalCmdRespCb;
-    deque<BufferedWriteEntry> write_merge_buffer;
-    map<uint64_t, deque<WriteDataRoute> > write_data_routes;
-    map<uint64_t, unsigned> buffered_write_data_counts;
-    map<uint64_t, InternalWriteRespContext> internal_write_resp_contexts;
-    deque<PendingWriteResp> pending_write_merge_resps;
-    uint64_t next_internal_write_task;
+    vector<WriteMergeEntry> write_merge_buffer;
+    vector<PendingWriteMergeResp> pending_write_merge_resps;
+    vector<PendingWriteMergeData> pending_write_merge_datas;
+    vector<WriteMergeDataRemap> write_merge_data_remaps;
+    uint64_t next_write_merge_task;
+    uint64_t pre_write_merge_resp_time;
+    unsigned totalWriteMergeInput;
+    unsigned totalWriteMergePair;
+    unsigned totalWriteMergeUnpairedToRmw;
+    unsigned totalWriteMergeUnpairedDirect;
+    unsigned totalWriteMergeBufferFull;
+    unsigned preWriteMergeInput;
+    unsigned preWriteMergePair;
+    unsigned preWriteMergeUnpairedToRmw;
+    unsigned preWriteMergeUnpairedDirect;
+    unsigned preWriteMergeBufferFull;
 
     bool handleReadData(unsigned channel, uint64_t task, double readDataEnterDmcTime,
             double reqAddToDmcTime, double reqEnterDmcBufTime);
@@ -269,16 +267,18 @@ private:
     bool submitTransaction(Transaction *trans);
     bool is_write_merge_candidate(const Transaction *trans) const;
     bool can_merge_write_pair(const Transaction *first, const Transaction *second) const;
-    unsigned count_buffered_write_cmds() const;
-    uint64_t allocate_internal_write_task();
-    void enqueue_pending_write_resp(uint64_t external_task, unsigned upstream_channel);
-    void pump_pending_write_resps();
-    void drain_buffered_write_data();
-    Transaction *build_merged_transaction(const BufferedWriteEntry &entry, uint64_t internal_task) const;
-    bool dispatch_buffered_write(size_t entry_index, bool merged_dispatch);
-    bool flush_oldest_buffered_write();
-    void pump_write_merge_buffer();
-    bool is_task_buffered(uint64_t task) const;
+    Transaction *build_merged_write_transaction(WriteMergeEntry &entry, uint64_t merged_task, bool mask_wcmd);
+    bool handle_write_merge_transaction(Transaction *trans);
+    bool dispatch_write_merge_entry(size_t index, bool force_mask_wcmd);
+    bool pump_write_merge_buffer();
+    bool flush_one_write_merge_entry();
+    bool remap_write_merge_data(uint32_t *data, uint64_t task);
+    bool is_write_merge_data_task(uint64_t task) const;
+    bool add_write_merge_data(uint32_t *data, uint64_t task);
+    void update_write_merge_resp();
+    bool update_write_merge_data();
+    bool write_merge_response(uint64_t task, uint8_t channel);
+    void flush_all_write_merge_entries();
 };
 }
 #endif
