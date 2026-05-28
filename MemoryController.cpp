@@ -122,7 +122,6 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     packet.clear();
     pre_req_time = 0xFFFFFFFFFFFFFFFF;
     pre_req_data_time = 0xFFFFFFFFFFFFFFFF;
-    next_wdata_trans_time = 0;
     pre_rresp_time = 0xFFFFFFFFFFFFFFFF;
     pre_cresp_time = 0xFFFFFFFFFFFFFFFF;
     rd_met_abr_cnt = 0;
@@ -682,6 +681,8 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     lc_rw_met_type = DATA_READ;
     global_rw_sync_valid = false;
     global_rw_sync_type = DATA_READ;
+    global_rw_sync_same_cnt = 0;
+    global_rw_sync_opposite_cnt = 0;
     pseudo_rw_conf_cnt = 0;
     mrd_rd_issue_gap = 0;
     mrd_wr_issue_gap = 0;
@@ -1057,47 +1058,20 @@ void MemoryController::Cmd2Dfi_statistics(uint64_t task, uint64_t timeAdded, uns
 
 void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, unsigned qos,
         unsigned mid, unsigned pf_type, unsigned rank, bool wb_flag) {
-    uint32_t delay = (now() - timeAdded);
-    // =========================================================================
-    // 1. 拦截内部任务：ECC 模式 1 的回读完�?(Read -> Write)
-    // =========================================================================
+
+    // 此时的 delay 已经包含了 data_fresh 中物理注入的 tWB_DLY 惩罚时间
+    uint32_t delay = (now() - timeAdded); 
+    
+    // 顶部拦截：Mode 1 的最终“回读”完成
     if (wb_flag) {
-        auto it = ecc_wb_pending_rd.find(task);
-        if (it != ecc_wb_pending_rd.end()) {
-            TRANS_MSG &msg = it->second;            
-            // 阶段 2：读返回了，现在生成真正的回�?(WRITE) 命令
-            Transaction *trans = new Transaction;
-            trans->transactionType = DATA_WRITE;
-            trans->address = msg.address;
-            trans->rank = msg.rank;
-            trans->bankIndex = msg.bankIndex;
-            trans->row = msg.row;
-            trans->col = msg.col;
-            trans->group = msg.group;
-            trans->sid = msg.sid;
-            trans->data_size = msg.data_size;
-            trans->burst_length = msg.burst_length;
-            trans->qos = msg.qos;
-            trans->mid = msg.mid;
-            trans->task = task;
-            trans->pre_act = false;
-            trans->mask_wcmd = false;
-            trans->ap_cmd = false;
-            trans->data_ready_cnt = trans->burst_length + 1;
-            trans->wb = true; // 标记为回�?
-            // 将单指针赋值改为直接进入发送队�?
-            ecc_wb_queue.push_back(trans);
-            if (DEBUG_BUS) {
-                PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 READ Finished -> Generated WRITE, internal_task="
-                       <<trans->task<<" addr=0x"<<hex<<msg.address<<dec<<endl);
-            }
-            
-            ecc_wb_pending_rd.erase(it); // 清理字典
+        if (DEBUG_BUS) {
+            PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 READ-BACK Finished! task="<<task<<endl);
         }
-        // 内部的读命令不应该计入正常的业务读延迟统计中，直�?return
+        // 内部的回读清洗校验任务完成，不计入业务延迟统计，直接结束
         return; 
     }
 
+    // 正常业务的读延迟统计
     if (DEBUG_BUS) {
         PRINTN(setw(10)<<now()<<" -- OVER :: Read DELAY ("<<delay<<") task="<<task<<endl);
     }
@@ -1110,6 +1084,7 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
         dly_ex2000_cnt ++;
         PRINTN(setw(16)<<now()<<"Read DMC["<<delay<<"], num ["<<dly_ex2000_cnt<<"]"<<endl);
     }
+    
     com_read_cnt ++;
     total_latency += delay;
     ddrc_av_lat = float(total_latency) / com_read_cnt;
@@ -1127,72 +1102,53 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
         min_delay_id = task;
     }
     
-    // 外部任务完成，进�?ECC 回写触发判断
+    // 收尾：无论是 Mode 0 还是 1，均触发物理回写 (DATA_WRITE)
     if (ECC_WB_EN) {
-        ecc_wb_cnt++;
-        if (ecc_wb_cnt >= ECC_WB_TH) {
-            ecc_wb_cnt = 0;
+        // 任务已彻底完成，清除标记，防止内存泄漏
+        ecc_checked_tasks.erase(task); 
+        task_ecc_release_time.erase(task);
+        
+        // 检查 data_fresh() 中结果，是否需要真正产生物理回写
+        auto it_wb = tasks_need_ecc_wb.find(task);
+        if (it_wb != tasks_need_ecc_wb.end()) {
+            tasks_need_ecc_wb.erase(it_wb); 
+            
             auto it = pending_TransactionQue.find(task);
             if (it != pending_TransactionQue.end()) {
-                TRANS_MSG &msg = it->second;                
-                if (ECC_WB_MODE == 0) {
-                    // 模式0：直接回�?
-                    Transaction *trans = new Transaction;
-                    trans->transactionType = DATA_WRITE;
-                    trans->address = msg.address;
-                    trans->rank = msg.rank;
-                    trans->bankIndex = msg.bankIndex;
-                    trans->row = msg.row;
-                    trans->col = msg.col;
-                    trans->group = msg.group;
-                    trans->sid = msg.sid;
-                    trans->data_size = msg.data_size;
-                    trans->burst_length = msg.burst_length;
-                    trans->qos = msg.qos;
-                    trans->mid = msg.mid;
-                    trans->task = task;
-                    trans->pre_act = false;
-                    trans->mask_wcmd = false;
-                    trans->ap_cmd = false;
-                    trans->data_ready_cnt = trans->burst_length + 1;
-                    trans->wb = true;                        
-                    uint64_t target_time = now() + ceil(float(tWB_DLY) / tDFI);
-                    delayed_ecc_wb_queue.push_back({trans, target_time});
-                    if (DEBUG_BUS) {
-                        PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 0 Scheduled. Will activate at: " << target_time<<endl);
-                    }
-                } 
-                else if (ECC_WB_MODE == 1) {
-                    // 模式1：阶�?1 -> 生成回读命令 (DATA_READ)
-                    Transaction *trans = new Transaction;
-                    trans->transactionType = DATA_READ;
-                    trans->address = msg.address;
-                    trans->rank = msg.rank;
-                    trans->bankIndex = msg.bankIndex;
-                    trans->row = msg.row;
-                    trans->col = msg.col;
-                    trans->group = msg.group;
-                    trans->sid = msg.sid;
-                    trans->data_size = msg.data_size;
-                    trans->burst_length = msg.burst_length;
-                    trans->qos = msg.qos;
-                    trans->mid = msg.mid;
-                    trans->task = task; // 必须大于 INTERNAL_TASK_START
-                    trans->pre_act = false;
-                    trans->mask_wcmd = false;
-                    trans->ap_cmd = false;
-                    trans->wb = true;
-                    // 备份上下文到字典中，等待这个 read 返回时使�?
-                    ecc_wb_pending_rd[trans->task] = msg;
-                    // 同样放入延迟暂存区，模拟检错延�?
-                    uint64_t target_time = now() + ceil(float(tWB_DLY) / tDFI);
-                    delayed_ecc_wb_queue.push_back({trans, target_time});
-                    if (DEBUG_BUS) {
-                        PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 READ Scheduled. Will activate at: " << target_time<<endl);
-                    }
+                TRANS_MSG &msg = it->second;
+                
+                // 生成 DATA_WRITE
+                Transaction *trans = new Transaction;
+                trans->transactionType = DATA_WRITE;
+                trans->address = msg.address;
+                trans->rank = msg.rank;
+                trans->bankIndex = msg.bankIndex;
+                trans->row = msg.row;
+                trans->col = msg.col;
+                trans->group = msg.group;
+                trans->sid = msg.sid;
+                trans->data_size = msg.data_size;
+                trans->burst_length = msg.burst_length;
+                trans->qos = msg.qos;
+                trans->mid = msg.mid;
+                trans->task = task;      // 直接复用原业务读请求的 task ID
+                trans->pre_act = false;
+                trans->mask_wcmd = false;
+                trans->ap_cmd = false;
+                trans->data_ready_cnt = trans->burst_length + 1;
+                trans->wb = true;        // 依靠 wb_flag = true 将其与外部命令区分开
+                
+                // 延时已经在物理层熬过了，这里直接进就绪队列即可，立刻执行
+                ecc_wb_queue.push_back(trans);
+                
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- ECC WB: Scheduled WRITE immediately (delay served). task="<<task<<endl);
                 }
-            } else {
-                ERROR(setw(10)<<now()<<" -- ECC WB: task not found in pending_TransactionQue");
+
+                // 如果是 Mode 1：将这个复用的 task ID 登记在册，去 data_fresh 监听它的 Write 完成
+                if (ECC_WB_MODE == 1) {
+                    ecc_wb_pending_wr[task] = msg;
+                }
             }
         }
     }
@@ -1219,125 +1175,6 @@ unsigned MemoryController::get_rdata_chunk_beats(const TRANS_MSG &msg) const {
     return chunk_beats;
 }
 
-void MemoryController::collect_ready_read_data() {
-    for (size_t i = 0; i < read_data_buffer.size();) {
-        if (read_data_buffer[i].delay != 0) {
-            i++;
-            continue;
-        }
-
-        uint64_t task = read_data_buffer[i].task;
-        auto it = pending_TransactionQue.find(task);
-        if (it == pending_TransactionQue.end()) {
-            ERROR(setw(10)<<now()<<" -- [DMC"<<channel<<"] mismatch data, task="<<task);
-            assert(0);
-        }
-
-        TRANS_MSG &msg = it->second;
-        msg.data_collected_cnt++;
-        msg.data_ready_cnt++;
-
-        unsigned chunk_beats = get_rdata_chunk_beats(msg);
-        unsigned total_beats = msg.burst_length + 1;
-        if (!msg.rdata_queued &&
-                (msg.data_ready_cnt >= chunk_beats || msg.data_collected_cnt >= total_beats)) {
-            rdata_ready_tasks.push_back(task);
-            msg.rdata_queued = true;
-        }
-
-        if (PRINT_RDATA || DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- RDATA_COLLECT :: task="<<task
-                    <<", collected="<<unsigned(msg.data_collected_cnt)<<"/"<<total_beats
-                    <<", ready="<<unsigned(msg.data_ready_cnt)
-                    <<", sent="<<unsigned(msg.burst_cnt)<<endl);
-        }
-
-        read_data_buffer.erase(read_data_buffer.begin() + i);
-    }
-}
-
-void MemoryController::service_ready_read_data() {
-    while (!rdata_ready_tasks.empty()) {
-        uint64_t task = rdata_ready_tasks.front();
-        auto it = pending_TransactionQue.find(task);
-        if (it == pending_TransactionQue.end()) {
-            rdata_ready_tasks.pop_front();
-            continue;
-        }
-
-        TRANS_MSG &msg = it->second;
-        unsigned total_beats = msg.burst_length + 1;
-        if (msg.data_ready_cnt == 0) {
-            msg.rdata_queued = false;
-            rdata_ready_tasks.pop_front();
-            continue;
-        }
-
-        double readDataEnterDmcTime = now() * tDFI;
-#ifdef SYSARCH_PLATFORM
-        unsigned rdata_type = 0;
-        if (msg.burst_cnt == 0) rdata_type |= (1 << 1);
-        if ((msg.burst_cnt + 1) == total_beats) rdata_type |= 1;
-        rdata_type |= (msg.qos << 2);
-        rdata_type |= (msg.pf_type << 6);
-        rdata_type |= (msg.sub_pftype << 8);
-        rdata_type |= (msg.sub_src << 12);
-        msg.reqAddToDmcTime = double(rdata_type);
-#endif
-
-        bool sys_bp = false;
-        if ((!IECC_ENABLE || !tasks_info[task].rd_ecc) && !msg.wb) {
-            sys_bp = !returnReadData(msg.channel, task, readDataEnterDmcTime,
-                    msg.reqAddToDmcTime, msg.reqEnterDmcBufTime);
-        }
-        if (sys_bp) {
-            if (PRINT_READ || DEBUG_BUS) {
-                PRINTN(setw(10)<<now()<<" -- Rdata Back Pressure :: task="<<task
-                        <<" ch="<<channel<<endl);
-            }
-            return;
-        }
-
-        pre_rdata_time = now();
-        rdata_cnt++;
-        msg.data_ready_cnt--;
-        msg.burst_cnt++;
-
-        if (PRINT_READ) {
-            TRACE_PRINT(setw(10)<<now()<<" -- Rdata Received :: task="<<task<<", latency="
-                    <<ceil(((readDataEnterDmcTime - msg.reqEnterDmcBufTime) / tDFI))
-                    <<" ch="<<channel<<endl);
-        }
-        if (PRINT_IDLE_LAT) {
-            DEBUG(setw(10)<<now()<<" -- Rdata Received :: task="<<task<<", latency="
-                    <<ceil(((readDataEnterDmcTime - msg.reqEnterDmcBufTime) / tDFI)));
-        }
-        if (DEBUG_BUS || PRINT_RDATA) {
-            PRINTN(setw(10)<<now()<<" -- RDATA_SEND :: task="<<task
-                    <<", sent="<<unsigned(msg.burst_cnt)<<"/"<<total_beats
-                    <<", ready_left="<<unsigned(msg.data_ready_cnt)<<endl);
-        }
-
-        if (msg.burst_cnt >= total_beats) {
-            ReturnData_statistics(task, msg.time, msg.qos, msg.mid, msg.pf_type, msg.rank, msg.wb);
-            pending_TransactionQue.erase(task);
-            if (IECC_ENABLE) tasks_info[task].rd_finish = true;
-            if (RMW_ENABLE) {
-                auto iter = rmw_rd_finish.find(task);
-                if (iter != rmw_rd_finish.end()) {
-                    rmw_rd_finish[task] = true;
-                }
-            }
-            rdata_ready_tasks.pop_front();
-        } else if (msg.data_ready_cnt == 0) {
-            msg.rdata_queued = false;
-            rdata_ready_tasks.pop_front();
-        }
-
-        return;
-    }
-}
-
 //receive the write data from CPU
 void MemoryController::receiveFromCPU(unsigned int *data, uint64_t task) {
     unsigned second_time = 0;
@@ -1361,7 +1198,6 @@ void MemoryController::receiveFromCPU(unsigned int *data, uint64_t task) {
     wdata_pipe wdata;
     wdata.task = task;
     wdata.delay = now() + tWDATA_DMC;
-    wdata.trans_delay = wdata.delay;
     WdataPipe.push_back(wdata);
     pre_req_data_time= now();
     if (DEBUG_BUS) {
@@ -2645,7 +2481,7 @@ void MemoryController::fresh_timing(const BusPacket &bus_packet,bool hit) {
                         }
                     }
                 }
-// bailuV200
+                // bailuV200
                 trfcpb -= ps_addtional_latency;
 
                 if (DMC_V596)
@@ -2728,7 +2564,6 @@ void MemoryController::fresh_timing(const BusPacket &bus_packet,bool hit) {
         default : break;
     }
 }
-
 /***************************************************************************************************
 descriptor: power event statistics
 ****************************************************************************************************/
@@ -2755,9 +2590,6 @@ void MemoryController::update_wdata() {
     if (now() < delay) {
         return;
     }
-    if (DMC_DB_TRANS_EN && now() < next_wdata_trans_time) {
-        return;
-    }
 
     for (auto &t : transactionQueue) {
         if (t->transactionType == DATA_READ) continue;
@@ -2765,16 +2597,24 @@ void MemoryController::update_wdata() {
         if (task != t->task) {
             continue;
         }
-        t->data_ready_cnt ++;
-        WdataPipe.erase(WdataPipe.begin());
-        if (DMC_DB_TRANS_EN) {
-            next_wdata_trans_time = now() + 2;
+
+        // 32B 数据的 2 拍消化打拍逻辑
+        if (!wdata_half_beat_done) {
+            wdata_half_beat_done = true;  
+            if (DEBUG_BUS) {
+                 PRINTN(setw(10)<<now()<<" -- MATCH :: eating first 16B of 32B, task="<<t->task<<endl);
+            }
+        } else {
+            // 第 2 拍：处理后半段 (16B)
+            t->data_ready_cnt ++;             // 底层拿到完整的 32B
+            WdataPipe.erase(WdataPipe.begin()); // 将这 32B 从入口缓存中彻底清掉
+            wdata_half_beat_done = false;       // 状态复位，准备迎接下一个 32B
+            if (DEBUG_BUS) {
+                 PRINTN(setw(10)<<now()<<" -- MATCH :: data ready cnt="<<t->data_ready_cnt
+                         <<", burst_length="<<t->burst_length<<", task="<<t->task<<endl);
+            }
         }
-        if (DEBUG_BUS) {
-             PRINTN(setw(10)<<now()<<" -- MATCH :: data ready cnt="<<t->data_ready_cnt<<", burst_length="
-                     <<t->burst_length<<", data_size="<<t->data_size<<", task="<<t->task<<endl);
-        }
-        break;
+        break; // 每次 update 周期只执行一拍动作
     }
 }
 
@@ -3373,7 +3213,7 @@ void MemoryController::exec() {
             uint8_t dfi_rw_type = NO_GROUP;
             if (command.type == READ_CMD || command.type == READ_P_CMD) dfi_rw_type = DATA_READ;
             else if (command.type == WRITE_CMD || command.type == WRITE_P_CMD || command.type == WRITE_MASK_CMD || command.type == WRITE_MASK_P_CMD) dfi_rw_type = DATA_WRITE;
-            if (DMC_RW_SYNC_EN && dfi_rw_type != NO_GROUP && global_rw_sync_valid && dfi_rw_type != global_rw_sync_type) {
+            if (false && DMC_RW_SYNC_EN && dfi_rw_type != NO_GROUP && global_rw_sync_valid && dfi_rw_type != global_rw_sync_type) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- EXEC :: GLOBAL RW sync hold opposite dir DFI cmd type="<<+dfi_rw_type
                             <<", global_type="<<+global_rw_sync_type<<endl);
@@ -3884,7 +3724,7 @@ void MemoryController::gd2_dist_refresh() {
                 }
             }
 
-            // ========== 新增 bank 级处理（添加在原有逻辑之后�?==========
+            // ========== 新增 bank 级处理（添加在原有逻辑之后） ==========
             // 处理 bank 级预充电次数累积
             if (DistRefState[bank].pre_cmd_cnt_bank >= PRE_NUM_SEND_PBR_BANK) {
                 DistRefState[bank].pre_cmd_cnt_bank = 0;
@@ -3896,7 +3736,7 @@ void MemoryController::gd2_dist_refresh() {
                 // assert(0);
             }
 
-            // 设置 bank 级强制刷新标�?
+            // 设置 bank 级强制刷新标志
             DistRefState[bank].force_dist_refresh_bank = false;
             // if (DistRefState[bank].dist_pstpnd_num_bank >= PBR_PSTPND_LEVEL) {
             //     DistRefState[bank].force_dist_refresh_bank = true;
@@ -3906,7 +3746,7 @@ void MemoryController::gd2_dist_refresh() {
                 bank_distref_ready = true;
             }
 
-            // ========== 原有 bank 状态检查（完全保留�?==========
+            // ========== 原有 bank 状态检查（完全保留） ==========
             if (bankStates[bank].state->currentBankState != Idle &&
                     bankStates[bank].state->currentBankState != Refreshing) continue;
             if (!DistRefState[bank].force_dist_refresh && bank_cnt[bank] > 0 &&
@@ -3916,7 +3756,7 @@ void MemoryController::gd2_dist_refresh() {
             if (bankStates[bank].state->act_executing) continue;
             if (SEND_DSTREF_SERIAL && has_bank_distref && distref_bank != bank) continue;
 
-            // ========== 优先级判断：�?matgrp 触发则处�?matgrp，否则处�?bank ==========
+            // ========== 优先级判断：有 matgrp 触发则处理 matgrp，否则处理 bank ==========
             if (has_matgrp_distref || bank_distref_ready) {
                 unsigned rank = bank / NUM_BANKS;
                 funcState[rank].wakeup = true;
@@ -4438,6 +4278,7 @@ void MemoryController::per_bank_refresh(unsigned rank, unsigned sc) {
     send_pb_precharge(rank, sc);
     send_pb_refresh(rank, sc);
 }
+
 void MemoryController::send_pb_precharge(unsigned rank, unsigned sc) {
     // unrefreshed bank is 2 left, force pbr
     bool have_bank_refresh = false; // send pbr one by one if set true
@@ -5087,7 +4928,6 @@ void MemoryController::enh_per_bank_refresh(unsigned rank, unsigned sc) {
     enh_send_pb_precharge(rank, sc);
     enh_send_pb_refresh(rank, sc);
 }
-
 void MemoryController::enh_send_pb_precharge(unsigned rank, unsigned sc) {
     // unrefreshed bank is 2 left, force pbr
     bool have_bank_refresh = false; // send pbr one by one if set true
@@ -5546,8 +5386,10 @@ void MemoryController::scheduler() {
         rw_issue_type = c->type;
         if (c->type == DATA_READ) {
             mrd_rd_issue_gap = 0;
+            mrd_wr_issue_gap ++;
         } else {
             mrd_wr_issue_gap = 0;
+            mrd_rd_issue_gap ++;
         }
         no_sch_cmd_en = true;
         no_sch_cmd_cnt = 0x0;
@@ -6601,7 +6443,6 @@ void MemoryController::faw_update() {
         if (tFPWCountdown[i].size() > 0 && tFPWCountdown[i][0] == 0) tFPWCountdown[i].erase(tFPWCountdown[i].begin());
     }
 }
-
 void MemoryController::calc_occ() {
     if (availability < MAP_CONFIG["DMC_BW_LEVEL"][0]) {
         occ = 0;
@@ -6818,6 +6659,7 @@ std::string MemoryController::trans_type_opcode(TransactionType state) {
     }
     return "Unkown opcode";
 }
+
 /***************************************************************************************************
 descriptor: main update ,every cycle will execute it
 ****************************************************************************************************/
@@ -7416,9 +7258,6 @@ void MemoryController::update_rwgroup_state() {
         }
     }
 
-    // =======================================================
-    // 状态机流水线滚动逻辑
-    // =======================================================
     rw_group_update_done:
     if (rw_cmd_num >= RHIT_RW_CMD_NUM) {
         rw_cmd_num = 0;
@@ -7429,53 +7268,8 @@ void MemoryController::update_rwgroup_state() {
     } else {
         rw_group_state.push_back(rw_group_state.back());
         rw_group_state.erase(rw_group_state.begin());
-    }   
+    }
     sch_tout_cmd = false;
-}
-
-bool MemoryController::IsRWGray() {
-    if (rw_group_state[0] == NO_GROUP) return false;
-    bool intent_is_read = (rw_group_state[0] == READ_GROUP);
-    bool physical_is_write = in_write_group;
-    // 如果意图和物理现状一致，处于稳态，无灰�?
-    if ((intent_is_read && !physical_is_write) || (!intent_is_read && physical_is_write)) {
-        return false; 
-    }
-
-    bool old_needs_drain = false;
-    bool new_ready_for_cas = false;
-
-    // 遍历队列，同时打探新旧方向命令状�?
-    for (auto &trans : transactionQueue) {
-        if (trans->timeout) continue;
-        
-        bool is_old_dir = (intent_is_read && trans->transactionType != DATA_READ) || 
-                          (!intent_is_read && trans->transactionType == DATA_READ);
-        
-        if (is_old_dir) {
-            if (trans->issue_size > 0 && trans->issue_size < trans->data_size) {
-                return true; 
-            }
-            if (trans->issue_size == 0 && trans->nextCmd != activate_cmd) {
-                if (trans->transactionType != DATA_READ && trans->data_ready_cnt <= trans->burst_length) continue;
-                unsigned threshold = intent_is_read ? RW_GRPCHG_W2R_TH : RW_GRPCHG_R2W_TH;
-                if (rwgrp_ch_cmd_cnt < threshold) {
-                    old_needs_drain = true;
-                }
-            }
-        } else {
-            bool is_cas_cmd = (trans->nextCmd >= WRITE_CMD && trans->nextCmd <= READ_P_CMD);
-            if (is_cas_cmd) {
-                new_ready_for_cas = true; 
-            }
-        }
-    }
-    
-    if (new_ready_for_cas) {
-        return false; 
-    }
-
-    return old_needs_drain;
 }
 
 void MemoryController::SetRwSyncHint(bool valid, uint8_t target_group, bool is_rw_gray) {
@@ -7533,9 +7327,19 @@ uint8_t MemoryController::GetPendingDfiRwType() const {
     return DATA_WRITE;
 }
 
+bool MemoryController::HasPendingWork() const {
+    return !transactionQueue.empty() || !WriteResp.empty() || !ReadResp.empty() || !CmdResp.empty()
+            || dresp_cnt != 0 || (que_read_cnt + que_write_cnt) != 0;
+}
+
 void MemoryController::SetGlobalRwSyncDirection(bool valid, uint8_t type) {
     global_rw_sync_valid = valid;
     global_rw_sync_type = type;
+}
+
+void MemoryController::SetGlobalRwSyncQueueState(unsigned same_cnt, unsigned opposite_cnt) {
+    global_rw_sync_same_cnt = same_cnt;
+    global_rw_sync_opposite_cnt = opposite_cnt;
 }
 
 bool MemoryController::HasReadyCasType(uint8_t type) const {
@@ -7548,6 +7352,10 @@ bool MemoryController::HasReadyCasType(uint8_t type) const {
         if (trans->nextCmd >= WRITE_CMD && trans->nextCmd <= READ_P_CMD) return true;
     }
     return false;
+}
+
+unsigned MemoryController::GetRwQueueCnt(uint8_t type) const {
+    return type == DATA_READ ? que_read_cnt : que_write_cnt;
 }
 
 bool MemoryController::GetMrdSwitchToRead() const {
@@ -8036,7 +7844,6 @@ void MemoryController::que_pipeline() {
         pbr_block_allcmd_cycle ++;
     }
 }
-
 void MemoryController::page_timeout_policy() {
     if (!PAGE_TIMEOUT_EN) return;
 
@@ -8096,6 +7903,7 @@ void MemoryController::data_fresh() {
         }
     }
 
+    // 物理写数据发送与 Mode 1 回读触发
     unsigned size = writeDataToSend.size();
     if (size > 0) {
         for (size_t i = 0; i < size; i ++) {
@@ -8104,30 +7912,342 @@ void MemoryController::data_fresh() {
         }
 
         if (writeDataToSend[0].delay == 0) {
-            //send to bus and print debug stuff
-            auto it = wdata_info.find(writeDataToSend[0].task);
+            uint64_t wr_task = writeDataToSend[0].task; // 获取当前 task
+            
+            auto it = wdata_info.find(wr_task);
             if (it != wdata_info.end()) {
-                wdata_info[writeDataToSend[0].task]--;
+                wdata_info[wr_task]--;
             }
-            if (wdata_info[writeDataToSend[0].task] == 0) {
-                wdata_info.erase(writeDataToSend[0].task);
-                if (IECC_ENABLE) tasks_info[writeDataToSend[0].task].wr_finish = true;
+            
+            // 当这笔 Write 的最后一个 Chunk 发送完毕时：
+            if (wdata_info[wr_task] == 0) {
+                wdata_info.erase(wr_task);
+                if (IECC_ENABLE) tasks_info[wr_task].wr_finish = true;
+
+                //  ECC 阶段 2 触发器：拦截 Mode 1 的 Write 完成，立即生成 Read
+                if (ECC_WB_EN && ECC_WB_MODE == 1) {
+                    auto it_wr = ecc_wb_pending_wr.find(wr_task);
+                    if (it_wr != ecc_wb_pending_wr.end()) {
+                        TRANS_MSG &msg = it_wr->second;
+                        
+                        Transaction *trans = new Transaction;
+                        trans->transactionType = DATA_READ;
+                        trans->address = msg.address;
+                        trans->rank = msg.rank;
+                        trans->bankIndex = msg.bankIndex;
+                        trans->row = msg.row;
+                        trans->col = msg.col;
+                        trans->group = msg.group;
+                        trans->sid = msg.sid;
+                        trans->data_size = msg.data_size;
+                        trans->burst_length = msg.burst_length;
+                        trans->qos = msg.qos;
+                        trans->mid = msg.mid;
+                        trans->task = wr_task; // 继续沿用这个 task_id 
+                        trans->pre_act = false;
+                        trans->mask_wcmd = false;
+                        trans->ap_cmd = false;
+                        trans->wb = true;      // 标记为内部清洗任务
+                        
+                        ecc_wb_queue.push_back(trans); 
+                        
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 WRITE Finished -> Generated READ-BACK, task="<<wr_task<<endl);
+                        }
+                        ecc_wb_pending_wr.erase(it_wr); 
+                    }
+                }
+                // -------------------------------------------------------------
             }
+            
             if (DEBUG_BUS) {
-                PRINTN(setw(10)<<now()<<" -- T_DDR :: write data on Data Bus, task="
-                        <<writeDataToSend[0].task<<endl);
+                PRINTN(setw(10)<<now()<<" -- T_DDR :: write data on Data Bus, task=" << wr_task <<endl);
             }
             writeDataToSend.erase(writeDataToSend.begin());
         }
     }
 
-    // Collect ready beats in read_data_buffer, then release them upward in 32B steps
-    // after each MERGE_DATA_SIZE chunk has been fully gathered.
-    collect_ready_read_data();
-    service_ready_read_data();
+    // ECC 判断：只计算释放时间，不修改物理 delay
+    if (ECC_WB_EN) {
+        unsigned size = read_data_buffer.size();
+        for (size_t i = 0; i < size; i++) {
+            if (read_data_buffer[i].delay == 0) {
+                uint64_t task = read_data_buffer[i].task;
+                
+                // 如果这个任务还没做过 ECC 判定，立刻判定
+                if (ecc_checked_tasks.find(task) == ecc_checked_tasks.end()) {
+                    ecc_checked_tasks.insert(task); 
+                    
+                    auto it = pending_TransactionQue.find(task);
+                    if (it != pending_TransactionQue.end()) {
+                        TRANS_MSG &msg = it->second;
+                        uint32_t step_weight = msg.data_size / 128;
+                        if (step_weight == 0) step_weight = 1;
+                        
+                        ecc_wb_cnt += step_weight;
+                        if (ecc_wb_cnt >= ECC_WB_TH) {
+                            ecc_wb_cnt -= ECC_WB_TH; // 触发 ECC
+                            
+                            // 计算释放时间戳
+                            uint32_t ecc_penalty = ceil(float(tWB_DLY) / tDFI);
+                            task_ecc_release_time[task] = now() + ecc_penalty; 
+                            
+                            // 掷骰子：决定要不要回写
+                            if ((rand() % 100) < WB_RATIO) {
+                                tasks_need_ecc_wb.insert(task);
+                            }
+                            
+                            if (DEBUG_BUS) {
+                                PRINTN(setw(10)<<now()<<" -- ECC: Triggered! task="<<task
+                                       <<", release_time="<<task_ecc_release_time[task]<<endl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    if (rdata_ready_tasks.empty()) {
+    //check for outstanding data to return to the CPU
+    size = read_data_buffer.size();
+    bool sys_bp = false;
+    bool rpfifo_write_this_cycle = false;
+    if (rp_fifo.empty()) {
+        for (size_t i = 0; i < size; i ++) {
+            if (0 == read_data_buffer[i].delay) {
+                unsigned long long task = read_data_buffer[i].task;
+                // bool ps_flag = read_data_buffer[i].ps;
+                // 新增 ECC 延时
+                if (ECC_WB_EN) {
+                    auto it_rel = task_ecc_release_time.find(task);
+                    if (it_rel != task_ecc_release_time.end()) {
+                        if (now() < it_rel->second) {
+                            // 延时未满，直接 continue，留在 read_data_buffer 里
+                            continue; 
+                        }
+                    }
+                }
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- T_CPU :: Issuing to CPU bus, task="<<task<<endl);
+                }
+                auto it = pending_TransactionQue.find(task);
+                if (it == pending_TransactionQue.end()) {
+                    ERROR(setw(10)<<now()<<" -- [DMC"<<channel<<"]"<<" mismatch data, task="<<task);
+                    assert(0);
+                }
+
+                TRANS_MSG msg = it->second;
+                msg.burst_cnt ++;
+                read_data_buffer[i].channel = msg.channel;
+#ifdef SYSARCH_PLATFORM
+                unsigned rdata_type = 0;
+                if (msg.burst_cnt == (msg.burst_length + 1)) rdata_type |= 1; // bit[0] is rdata_end
+                if (msg.burst_cnt == 0) rdata_type |= (1 << 1); // bit[1] is rdata_start
+                rdata_type |= (msg.qos << 2); // bit[5:2] is qos
+                rdata_type |= (msg.pf_type << 6); // bit[7:6] is pf_type
+                rdata_type |= (msg.sub_pftype << 8); // bit[11:8] is pf_type
+                rdata_type |= (msg.sub_src << 12); // bit[13:12] is pf_type
+                msg.reqAddToDmcTime = double(rdata_type);
+#endif
+                if ((!IECC_ENABLE || !tasks_info[task].rd_ecc) && (!RMW_ENABLE || (!read_data_buffer[i].mask_wcmd && RMW_ENABLE)) && !msg.wb) {
+                    read_data_buffer[i].readDataEnterDmcTime = now() * tDFI;
+                    sys_bp = !returnReadData(read_data_buffer[i].channel, task,
+                            read_data_buffer[i].readDataEnterDmcTime,
+                            msg.reqAddToDmcTime, msg.reqEnterDmcBufTime);
+                    if (sys_bp) {
+                        if (PRINT_READ) {
+                            TRACE_PRINT(setw(10)<<now()<<" -- Rdata Back Pressure :: task="<<task<<" ch="<<channel<<endl);
+                        }
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- Rdata Back Pressure :: task="<<task<<" ch="<<channel<<endl);
+                        }
+                        if (!RPFIFO_EN) {
+                            return;
+                        } else {
+                            rp_fifo.push_back(read_data_buffer[i]);
+                            rpfifo_write_this_cycle = true;
+                            if (DEBUG_BUS) {
+                                PRINTN(setw(10)<<now()<<" -- Rdata to rp_fifo, task="<<task<<", rp_fifo_size="<<rp_fifo.size()<<endl);
+                            }
+                        }
+                    } else {
+                        pre_rdata_time = now();
+                        rdata_cnt ++;
+                        if (PRINT_READ) {
+                            TRACE_PRINT(setw(10)<<now()<<" -- Rdata Received :: task="<<task<<", latency="
+                                    <<ceil(((read_data_buffer[i].readDataEnterDmcTime
+                                    - msg.reqEnterDmcBufTime) / tDFI))<<" ch="<<channel<<endl);
+                        }
+                        if (PRINT_IDLE_LAT) {
+                            DEBUG(setw(10)<<now()<<" -- Rdata Received :: task="<<task<<", latency="
+                                    <<ceil(((read_data_buffer[i].readDataEnterDmcTime
+                                    - msg.reqEnterDmcBufTime) / tDFI)));
+                        }
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- Rdata Received :: task="<<task<<", latency="
+                                    <<ceil(((read_data_buffer[i].readDataEnterDmcTime
+                                    - msg.reqEnterDmcBufTime) / tDFI))<<endl);
+                        }
+                    }
+                }
+                if (!sys_bp) {
+                    if (msg.burst_cnt == (msg.burst_length + 1)) {
+                        ReturnData_statistics(task, msg.time, msg.qos, msg.mid, msg.pf_type, msg.rank, msg.wb);
+                    }
+                    //return latency
+                    if (msg.burst_cnt == (msg.burst_length + 1)) {
+                        pending_TransactionQue.erase(task);
+                        if (IECC_ENABLE) tasks_info[task].rd_finish = true;
+                        if (RMW_ENABLE && read_data_buffer[i].mask_wcmd==true)  {
+                            auto iter = rmw_rd_finish.find(task);
+                            if (iter == rmw_rd_finish.end()){
+                                ERROR(setw(10)<<now()<<" -- Merge Read Data Mismatch, task="<<task);
+                                assert(0);
+                            }
+                            rmw_rd_finish[task] = true;
+                        }
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- Finish :: Issuing to CPU bus, task="<<task<<endl);
+                        }
+                    } else {
+                        it->second.burst_cnt = msg.burst_cnt;
+                    }
+                }
+                read_data_buffer.erase(read_data_buffer.begin() + i);
+                break;
+            } else {
+                if (IS_G3D) break;
+            }
+        }
+    } else {
+        if (!rpfifo_write_this_cycle) {
+            for (size_t i = 0; i < size; i ++) {
+                if (0 == read_data_buffer[i].delay) {
+                    unsigned long long task = read_data_buffer[i].task;
+                    if (ECC_WB_EN) {
+                        auto it_rel = task_ecc_release_time.find(task);
+                        if (it_rel != task_ecc_release_time.end()) {
+                            if (now() < it_rel->second) {
+                                // 延时未满，直接 continue，留在 read_data_buffer 里
+                                continue; 
+                            }
+                        }
+                    }
+                    if (rp_fifo.size() < RPFIFO_AMFULL_TH) {
+                        rp_fifo.push_back(read_data_buffer[i]);
+                        rpfifo_write_this_cycle = true;
+                        read_data_buffer.erase(read_data_buffer.begin() + i);
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- Rdata to rp_fifo, task="<<task<<", rpfifosize="<<rp_fifo.size()<<endl);
+                        }
+                    } else if (rp_fifo.size() < RPFIFO_DEPTH) {
+                        rp_fifo.push_back(read_data_buffer[i]);
+                        rpfifo_write_this_cycle = true;
+                        rcmd_bp_byrp = true;
+                        read_data_buffer.erase(read_data_buffer.begin() + i);
+                        if (DEBUG_BUS) {
+                            PRINTN(setw(10)<<now()<<" -- Rcmd bp, Rdata to rp_fifo, task="<<task<<", rpfifosize="<<rp_fifo.size()<<endl);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        
+        auto return_rdata = rp_fifo.front();
+        unsigned long long task = return_rdata.task;
+        if (DEBUG_BUS) {
+            PRINTN(setw(10)<<now()<<" -- T_CPU :: Issuing to CPU bus, from rp_fifo, task="<<task<<endl);
+        }
+        auto it = pending_TransactionQue.find(task);
+        if (it == pending_TransactionQue.end()) {
+            ERROR(setw(10)<<now()<<" -- [DMC"<<channel<<"]"<<" mismatch data, task="<<task);
+            assert(0);
+        }
+
+        TRANS_MSG msg = it->second;
+        msg.burst_cnt ++;
+        return_rdata.channel = msg.channel;
+#ifdef SYSARCH_PLATFORM
+        unsigned rdata_type = 0;
+        if (msg.burst_cnt == (msg.burst_length + 1)) rdata_type |= 1; // bit[0] is rdata_end
+        if (msg.burst_cnt == 0) rdata_type |= (1 << 1); // bit[1] is rdata_start
+        rdata_type |= (msg.qos << 2); // bit[5:2] is qos
+        rdata_type |= (msg.pf_type << 6); // bit[7:6] is pf_type
+        rdata_type |= (msg.sub_pftype << 8); // bit[11:8] is pf_type
+        rdata_type |= (msg.sub_src << 12); // bit[13:12] is pf_type
+        msg.reqAddToDmcTime = double(rdata_type);
+#endif
+        if ((!IECC_ENABLE || !tasks_info[task].rd_ecc) && !msg.wb) {
+            return_rdata.readDataEnterDmcTime = now() * tDFI;
+            sys_bp = !returnReadData(return_rdata.channel, task,
+                    return_rdata.readDataEnterDmcTime,
+                    msg.reqAddToDmcTime, msg.reqEnterDmcBufTime);
+            if (sys_bp) {
+                if (PRINT_READ) {
+                    TRACE_PRINT(setw(10)<<now()<<" -- Rdata Back Pressure :: task="<<task<<" ch="<<channel<<endl);
+                }
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- Rdata from rpfifo Back Pressure :: task="<<task<<" ch="<<channel<<endl);
+                }
+                return;
+            } else {
+                pre_rdata_time = now();
+                rdata_cnt ++;
+                if (PRINT_READ) {
+                    TRACE_PRINT(setw(10)<<now()<<" -- Rdata Received from rpfifo :: task="<<task<<", latency="
+                            <<ceil(((return_rdata.readDataEnterDmcTime
+                            - msg.reqEnterDmcBufTime) / tDFI))<<" ch="<<channel<<endl);
+                }
+                if (PRINT_IDLE_LAT) {
+                    DEBUG(setw(10)<<now()<<" -- Rdata Received from rpfifo :: task="<<task<<", latency="
+                            <<ceil(((return_rdata.readDataEnterDmcTime
+                            - msg.reqEnterDmcBufTime) / tDFI)));
+                }
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- Rdata Received from rpfifo:: task="<<task<<", latency="
+                            <<ceil(((return_rdata.readDataEnterDmcTime
+                            - msg.reqEnterDmcBufTime) / tDFI))<<endl);
+                }
+            }
+        }
+
+        if (!sys_bp) {
+            if (msg.burst_cnt == (msg.burst_length + 1)) {
+                ReturnData_statistics(task, msg.time, msg.qos, msg.mid, msg.pf_type, msg.rank, msg.wb);
+            }
+            //return latency
+            if (msg.burst_cnt == (msg.burst_length + 1)) {
+                pending_TransactionQue.erase(task);
+                if (IECC_ENABLE) tasks_info[task].rd_finish = true;
+                if (RMW_ENABLE && return_rdata.mask_wcmd==true)  {
+                    auto iter = rmw_rd_finish.find(task);
+                    if (iter == rmw_rd_finish.end()){
+                        ERROR(setw(10)<<now()<<" -- Merge Read Data Mismatch, task="<<task);
+                        assert(0);
+                    }
+                    rmw_rd_finish[task] = true;
+                }
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- Finish :: Issuing to CPU bus, task="<<task<<endl);
+                }
+            } else {
+                it->second.burst_cnt = msg.burst_cnt;
+            }
+
+            unsigned task = rp_fifo.front().task;
+            rp_fifo.pop_front();
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- Rdata from rp_fifo to upstream, task="<<task<<", rpfifosize="<<rp_fifo.size()<<endl);
+            }
+        }
+    }
+
+    if (rp_fifo.empty()) {
         rcmd_bp_byrp = false;
+        // if (DEBUG_BUS) {
+        //     PRINTN(setw(10)<<now()<<" -- Rp_bp_flag="<<rcmd_bp_byrp<<endl);
+        // }
     }
 
     size = read_data_buffer.size();
@@ -8141,7 +8261,7 @@ descriptor: update state var pre
 ****************************************************************************************************/
 void MemoryController::update_state_pre() {
 
-    // 1. 内部请求入队仲裁 (Internal Command Injection)
+    // 1. 内部请求入队仲裁
     if (!write_port_busy_this_cycle) {
         // 优先压入 ECC 回写命令队列的最前端任务
         if (!ecc_wb_queue.empty()) {
@@ -8151,7 +8271,7 @@ void MemoryController::update_state_pre() {
                 if (head->transactionType == DATA_READ) {
                     push_pending_TransactionQue(head);
                 }
-                // 成功入队后，从队列头部抹�?
+                // 成功入队后，从队列头部抹除
                 ecc_wb_queue.erase(ecc_wb_queue.begin());
             }
         }
@@ -8160,7 +8280,7 @@ void MemoryController::update_state_pre() {
             Transaction *head = ps_rd_queue.front();
             bool accepted = addTransaction(head);
             if (accepted) {
-                // 成功入队后弹�?
+                // 成功入队后弹出
                 ps_rd_queue.erase(ps_rd_queue.begin());
             }
         }
@@ -8237,18 +8357,18 @@ void MemoryController::update_state_pre() {
 descriptor: update patrol_scrubbing
 ****************************************************************************************************/
 void MemoryController::update_patrol_scrubbing() {
-    // 1. 如果未开启巡检，直接返�?
+    // 1. 如果未开启巡检，直接返回
     if (!PS_EN) return;
 
-    // 2. 移除 ps_rd_trans == nullptr 的阻塞判断。增加深度限制，防止在极端死锁情况下无限制生成导致内存泄�?
+    // 2. 移除 ps_rd_trans == nullptr 的阻塞判断。增加深度限制，防止在极端死锁情况下无限制生成导致内存泄漏
     if (ps_rd_queue.size() < 16 && now() >= next_ps_cycle) {
         
         Transaction *trans = new Transaction();
         
-        // --- A. 配置基础数据属�?---
+        // --- A. 配置基础数据属性 ---
         trans->transactionType = DATA_READ;
         trans->address = current_ps_addr;
-        trans->data_size = 256;  // 256B 巡检�?
+        trans->data_size = 256;  // 256B 巡检包
         
         // 计算 Burst Length
         trans->burst_length = 256 * 8 / DMC_DATA_BUS_BITS - 1; 
@@ -8263,14 +8383,14 @@ void MemoryController::update_patrol_scrubbing() {
         trans->sid = ps_sid;
         trans->group = ps_group;
         trans->bank = ps_bank;
-        // 这里�?bankIndex 计算保持逻辑一�?
+        // 这里的 bankIndex 计算保持逻辑一致
         trans->bankIndex = (ps_rank * NUM_SIDS + ps_sid) * NUM_BANKS + ps_group * (NUM_BANKS/NUM_GROUPS) + ps_bank; 
         trans->row = ps_row;
         trans->col = ps_col; 
         
         // --- D. 调度器属性与递增 Task ID ---
         
-        // 修改：task �?f 开始递增
+        // 修改：task 从 f 开始递增
         trans->task = 0xFFFFFFFFFFFFFFFFULL - (ps_task_counter % 8388608);
         ps_task_counter++; 
         
@@ -8292,7 +8412,7 @@ void MemoryController::update_patrol_scrubbing() {
                    << " (Rank:" << ps_rank << " Bank:" << trans->bankIndex << " Row:" << ps_row << " Col:" << ps_col << ")"<<endl);
         }
 
-        // --- F. 更新下一次触发时�?---
+        // --- F. 更新下一次触发时间 ---
         next_ps_cycle = now() + ceil(float(tPS)/tDFI);
         
         // --- G. 地址与物理坐标递增 (核心逻辑修改：col -> bank -> group -> sid -> row) ---  
@@ -8301,23 +8421,23 @@ void MemoryController::update_patrol_scrubbing() {
 
         if (ps_col >= col_size_bytes) {
             ps_col = 0;         // 1. 列满进位
-            ps_bank++;          // 2. 转向下一�?Bank，而不是下一�?
+            ps_bank++;          // 2. 转向下一个 Bank，而不是下一行
 
             if (ps_bank >= (NUM_BANKS / NUM_GROUPS)) {
                 ps_bank = 0;
-                ps_group++;     // 3. 转向下一�?Group
+                ps_group++;     // 3. 转向下一个 Group
 
                 if (ps_group >= NUM_GROUPS) {
                     ps_group = 0;
-                    ps_sid++;   // 4. 转向下一�?SID
+                    ps_sid++;   // 4. 转向下一个 SID
 
                     if (ps_sid >= NUM_SIDS) {
                         ps_sid = 0;
-                        ps_row++; // 5. 只有当所�?SID/Group/Bank 的当前行都扫过一遍，才增加行�?
+                        ps_row++; // 5. 只有当所有 SID/Group/Bank 的当前行都扫过一遍，才增加行号
 
                         if (ps_row >= NUM_ROWS) {
                             ps_row = 0;
-                            ps_rank++; // 6. 转向下一�?Rank
+                            ps_rank++; // 6. 转向下一个 Rank
                             
                             if (ps_rank >= NUM_RANKS) {
                                 ps_rank = 0; 
@@ -8332,13 +8452,13 @@ void MemoryController::update_patrol_scrubbing() {
 }
 
 void MemoryController::update_ecc_wb_delay() {
-    // 按顺序检查延迟队列中最早的任务 由于时间戳是递增的，只要队首任务没到时间，后面的肯定也没�?
+    // 按顺序检查延迟队列中最早的任务 由于时间戳是递增的，只要队首任务没到时间，后面的肯定也没到
     while (!delayed_ecc_wb_queue.empty()) {
         auto& front_item = delayed_ecc_wb_queue.front();
         uint64_t target_time = front_item.second;
         
         if (now() >= target_time) {
-            // 时间到了！将任务推入真正的发送队�?
+            // 时间到了！将任务推入真正的发送队列
             ecc_wb_queue.push_back(front_item.first);
             
             if (DEBUG_BUS) {
@@ -8928,7 +9048,6 @@ void MemoryController::lc(Transaction *t) {
             }
         }
     }
-
     if ((DistRefState[t->bankIndex].force_dist_refresh || DistRefState[t->bankIndex].force_dist_refresh_bank) && t->issue_size == 0) {
         if (DEBUG_BUS) {
             PRINTN(setw(10)<<now()<<" -- LC :: GD2 force disturb refresh bp, bank"<<t->bankIndex<<", task="<<t->task<<endl);
@@ -9041,30 +9160,6 @@ void MemoryController::lc(Transaction *t) {
         }
     }
 
-    if (DMC_RW_SYNC_EN) {
-        bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
-        bool bw_wr_mrdimm = availability >= 95 && mrd_wr_availability >= 45;
-        unsigned icfg_rdwr_chg_gap = 24;
-        unsigned icfg_mrd_rcmd_lvl2 = 16;
-        unsigned icfg_mrd_wcmd_lvl2 = 16;
-        bool allow_mrd_bp = is_cas_cmd && !t->timeout && t->issue_size == 0 && !t->act_executing && bw_wr_mrdimm;
-        mrd_switch_to_write = (mrd_rd_issue_gap >= icfg_rdwr_chg_gap) && que_write_cnt >= icfg_mrd_wcmd_lvl2 && mrd_peer_write_cnt >= icfg_mrd_wcmd_lvl2;
-        mrd_switch_to_read = (mrd_wr_issue_gap >= icfg_rdwr_chg_gap) && que_read_cnt >= icfg_mrd_rcmd_lvl2 && mrd_peer_read_cnt >= icfg_mrd_rcmd_lvl2;
-        mrd_bp_read_req = allow_mrd_bp && t->transactionType == DATA_READ && !mrd_switch_to_read &&
-                (mrd_switch_to_write || mrd_peer_switch_to_write);
-        mrd_bp_write_req = allow_mrd_bp && t->transactionType != DATA_READ && !mrd_switch_to_write &&
-                (mrd_switch_to_read || mrd_peer_switch_to_read);
-        if (mrd_bp_read_req || mrd_bp_write_req) {
-            if (DEBUG_BUS) {
-                PRINTN(setw(10)<<now()<<" -- LC :: MRDIMM RW change backpress. task="<<t->task
-                        <<", trans_type="<<t->transactionType<<", rcnt="<<que_read_cnt<<", wcnt="<<que_write_cnt
-                        <<", peer_r="<<mrd_peer_read_cnt<<", peer_w="<<mrd_peer_write_cnt
-                        <<", rd_gap="<<mrd_rd_issue_gap<<", wr_gap="<<mrd_wr_issue_gap<<endl);
-            }
-            return;
-        }
-    }
-
     if (rk_grp_state != NO_RGRP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         uint8_t t_state = (t->rank << 1) | uint8_t(t->transactionType);
@@ -9090,16 +9185,16 @@ void MemoryController::lc(Transaction *t) {
     if (rw_group_state[0] != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         if (DMC_RW_SYNC_EN) {
-                bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
-                if (is_cas_cmd && global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
-                    if (DEBUG_BUS) {
-                        PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir CAS. task="
-                                <<t->task<<", trans_type="<<t->transactionType
-                                <<", global_type="<<+global_rw_sync_type<<endl);
-                    }
-                    return;
+            bool is_cas_cmd = (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD);
+            if (is_cas_cmd && global_rw_sync_valid && t->transactionType != global_rw_sync_type) {
+                if (DEBUG_BUS) {
+                    PRINTN(setw(10)<<now()<<" -- LC :: GLOBAL RW sync backpress opposite dir CAS. task="
+                            <<t->task<<", trans_type="<<t->transactionType
+                            <<", global_type="<<+global_rw_sync_type<<endl);
                 }
-                if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
+                return;
+            }
+            if (rw_sync_hint_valid && is_cas_cmd && t->transactionType != rw_sync_hint_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: PSEUDO RW sync backpress opposite dir CAS. task="
                             <<t->task<<", trans_type="<<t->transactionType
@@ -9109,6 +9204,7 @@ void MemoryController::lc(Transaction *t) {
                 return;
             }
         }
+        // 原单通道逻辑
         if (rw_group_state[0] == READ_GROUP && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))) {
             if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !in_write_group) {
                 if (DEBUG_BUS) {
@@ -9305,6 +9401,7 @@ void MemoryController::lc(Transaction *t) {
             if (has_cmd_bp()) break;
             if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteMask) {
                 timing_met = true;
+                cas_cmd_timing_met = true;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: WRITE_MASK timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                 }
@@ -9315,6 +9412,7 @@ void MemoryController::lc(Transaction *t) {
             if (has_cmd_bp()) break;
             if ((now() + 1) >= bankStates[t->bankIndex].state->nextWriteMaskAp) {
                 timing_met = true;
+                cas_cmd_timing_met = true;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: WRITE_MASK_P timing met, bank="<<t->bankIndex<<", task="<<t->task<<endl);
                 }
@@ -9383,15 +9481,13 @@ void MemoryController::lc(Transaction *t) {
     if (DMC_RW_SYNC_EN && cas_cmd_timing_met) {
         lc_rw_met_valid = true;
         lc_rw_met_type = t->transactionType;
-        if (t->transactionType == DATA_READ) mrd_wr_issue_gap ++;
-        else mrd_rd_issue_gap ++;
-    }
-
-    if (timing_met) {
         if (t->nextCmd >= WRITE_CMD && t->nextCmd <= READ_P_CMD) {
             rw_req_valid = true;
             rw_req_type = t->transactionType;
         }
+    }
+
+    if (timing_met) {
         Cmd *c = new Cmd;
         if (((t->issue_size + t->trans_size) >= t->data_size) &&
                 ((t->nextCmd != PRECHARGE_PB_CMD && t->nextCmd != ACTIVATE2_CMD))) {
@@ -9601,7 +9697,7 @@ bool MemoryController::push_req(Transaction * trans) {
 //    DEBUG(now()<<" push_req0, sc_num="<<sc_num); 
     write_port_busy_this_cycle = true;
     
-    // 处理正常的外部请�?
+    // 处理正常的外部请求
     if (PERFECT_DMC_EN) {
         if (trans->transactionType == DATA_READ) {
             for (size_t i = 0; i <= trans->burst_length; i ++) {
