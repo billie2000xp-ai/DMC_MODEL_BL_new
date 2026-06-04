@@ -32,6 +32,10 @@ uint64_t read_data_resp_cnt = 0;
 uint64_t write_resp_cnt = 0;
 uint64_t match_task_limit = 20000;
 unsigned sim_random_seed = 2;
+unsigned frontend_rw_remain = 0;
+bool frontend_rw_is_read = true;
+unsigned frontend_rw_channel = 0;
+const unsigned FRONTEND_RW_GROUP_LEN = 128;
 std::vector<std::set<uint64_t>> SentReadTasks;
 std::vector<std::set<uint64_t>> SentWriteTasks;
 std::vector<std::set<uint64_t>> CompletedReadTasks;
@@ -351,7 +355,7 @@ void get_line() {
 void rand_command(LPMemorySystemTop *ddrc, bool is_test_cmd) {
     hha_command transaction;
     unsigned data_size = (SEQ_DATA_SIZE == 0) ? DATA_SIZE : SEQ_DATA_SIZE;
-    unsigned align = log2(data_size * SEQ_NUM);
+    unsigned align = log2(data_size * (SEQ_NUM == 0 ? 1 : SEQ_NUM));
     static uint64_t r_address = 0x0;
 //    static uint64_t w_address = 0x80000000;
     static uint64_t w_address = 0x00000400;
@@ -359,8 +363,17 @@ void rand_command(LPMemorySystemTop *ddrc, bool is_test_cmd) {
     static bool is_read = true;
     bool is_rank0 = (unsigned(rand()) % 100 >= RK_SW_RATIO);
 
+    bool frontend_rw_group_en = !is_test_cmd;
+    if (frontend_rw_group_en && frontend_rw_remain == 0) {
+        frontend_rw_is_read = (unsigned(rand() % 100) >= WR_RATIO);
+        frontend_rw_remain = FRONTEND_RW_GROUP_LEN;
+    }
 
-    if (SEQ_NUM == 0 && !is_test_cmd) {
+    if (frontend_rw_group_en) {
+        is_read = frontend_rw_is_read;
+        if (is_read) transaction.address = r_address + data_size;
+        else transaction.address = w_address + data_size;
+    } else if (SEQ_NUM == 0 && !is_test_cmd) {
         is_read = (unsigned(rand() % 100) >= WR_RATIO);
         if (is_read) transaction.address = r_address + data_size;
         else transaction.address = w_address + data_size;
@@ -391,7 +404,12 @@ void rand_command(LPMemorySystemTop *ddrc, bool is_test_cmd) {
     transaction.burst_length = DATA_SIZE * 8 / DMC_DATA_BUS_BITS - 1;
     transaction.id = task_cnt % 1000000;
     if(NUM_CHANS>1){  // lp6 n-mode/dynamic e-mode/combo e-mode
-        transaction.channel = rand() % 2;
+        if (frontend_rw_group_en) {
+            transaction.channel = frontend_rw_channel % NUM_CHANS;
+            frontend_rw_channel ++;
+        } else {
+            transaction.channel = rand() % 2;
+        }
 //        transaction.channel = 0;
     } else {
         transaction.channel = 0; // lp6 static e-mode/lp5 
@@ -447,6 +465,7 @@ void rand_command(LPMemorySystemTop *ddrc, bool is_test_cmd) {
             OutstandingQueue[transaction.channel][transaction.task] = is_read ? (transaction.burst_length + 1) : 1;
             task_cnt ++;
             seq_cnt ++;
+            if (frontend_rw_group_en && frontend_rw_remain > 0) frontend_rw_remain --;
             if (seq_cnt == SEQ_NUM) seq_cnt = 0;
             if (is_read) {
                 r_address = transaction.address;
@@ -523,8 +542,6 @@ void send_command(LPMemorySystemTop *ddrc) {
                             wdata w_data;
                             w_data.task = transaction.task;
                             w_data.delay = cnt + WDATA_DLY;
-                            //uint64_t address_and = MATRIX_CH & transaction.address;
-                            //w_data.ch = (bitset<64>(address_and).count() & 1);
                             w_data.ch = transaction.channel;
                             write_task.push_back(w_data);
                             data_cnt ++;
@@ -723,8 +740,10 @@ int main(int argc, char *argv[]) {
         mem->update();
          if (MATCH_MODE) {
             uint64_t expected_read_data_resp = read_cmd_send_cnt * (DATA_SIZE / (DMC_DATA_BUS_BITS / 8));
-            bool sent_enough = task_cnt >= match_task_limit && (trace_send_cnt >= task_cnt || (all_command_queues_empty() && !memory_accepts_transaction()))
-                    && all_command_queues_empty() && write_task.empty() && data_cnt == 0;
+            bool sent_enough = task_cnt >= match_task_limit && trace_send_cnt >= task_cnt && all_command_queues_empty()
+                    && write_task.empty() && data_cnt == 0;
+
+            
             bool all_sent_tasks_completed = true;
             for (size_t i = 0; i < SentReadTasks.size(); i++) {
                 all_sent_tasks_completed &= SentReadTasks[i].size() == CompletedReadTasks[i].size();
