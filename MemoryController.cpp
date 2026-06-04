@@ -688,19 +688,7 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     lc_rw_met_type = DATA_READ;
     global_rw_sync_valid = false;
     global_rw_sync_type = DATA_READ;
-    global_rw_sync_same_cnt = 0;
-    global_rw_sync_opposite_cnt = 0;
     pseudo_rw_conf_cnt = 0;
-    mrd_rd_issue_gap = 0;
-    mrd_wr_issue_gap = 0;
-    mrd_switch_to_read = false;
-    mrd_switch_to_write = false;
-    mrd_peer_read_cnt = 0;
-    mrd_peer_write_cnt = 0;
-    mrd_peer_switch_to_read = false;
-    mrd_peer_switch_to_write = false;
-    mrd_bp_read_req = false;
-    mrd_bp_write_req = false;
     mrd_wr_availability = 0;
     serial_cmd_cnt = 0x0;
     rwgrp_ch_cmd_cnt = 0x0;
@@ -5391,13 +5379,6 @@ void MemoryController::scheduler() {
         rw_req_type = c->type;
         rw_issue_valid = true;
         rw_issue_type = c->type;
-        if (c->type == DATA_READ) {
-            mrd_rd_issue_gap = 0;
-            mrd_wr_issue_gap ++;
-        } else {
-            mrd_wr_issue_gap = 0;
-            mrd_rd_issue_gap ++;
-        }
         no_sch_cmd_en = true;
         no_sch_cmd_cnt = 0x0;
         page_rw_cnt ++;
@@ -7344,9 +7325,11 @@ void MemoryController::SetGlobalRwSyncDirection(bool valid, uint8_t type) {
     global_rw_sync_type = type;
 }
 
-void MemoryController::SetGlobalRwSyncQueueState(unsigned same_cnt, unsigned opposite_cnt) {
-    global_rw_sync_same_cnt = same_cnt;
-    global_rw_sync_opposite_cnt = opposite_cnt;
+bool MemoryController::HasRwSyncTimeout() const {
+    for (auto &trans : transactionQueue) {
+        if (trans->timeout || trans->bp_by_tout) return true;
+    }
+    return false;
 }
 
 bool MemoryController::HasReadyCasType(uint8_t type) const {
@@ -7365,19 +7348,12 @@ unsigned MemoryController::GetRwQueueCnt(uint8_t type) const {
     return type == DATA_READ ? que_read_cnt : que_write_cnt;
 }
 
-bool MemoryController::GetMrdSwitchToRead() const {
-    return mrd_switch_to_read;
+unsigned MemoryController::GetDmcAvailability() const {
+    return availability;
 }
 
-bool MemoryController::GetMrdSwitchToWrite() const {
-    return mrd_switch_to_write;
-}
-
-void MemoryController::SetMrdPeerState(unsigned peer_read_cnt, unsigned peer_write_cnt, bool peer_switch_to_read, bool peer_switch_to_write) {
-    mrd_peer_read_cnt = peer_read_cnt;
-    mrd_peer_write_cnt = peer_write_cnt;
-    mrd_peer_switch_to_read = peer_switch_to_read;
-    mrd_peer_switch_to_write = peer_switch_to_write;
+unsigned MemoryController::GetDmcWriteAvailability() const {
+    return mrd_wr_availability;
 }
 
 uint8_t MemoryController::GetRwGroupTarget() const {
