@@ -181,12 +181,11 @@ public:
     bool HasPendingDfiRw() const;
     uint8_t GetPendingDfiRwType() const;
     void SetGlobalRwSyncDirection(bool valid, uint8_t type);
+    bool HasRwSyncTimeout() const;
     bool HasReadyCasType(uint8_t type) const;
     unsigned GetRwQueueCnt(uint8_t type) const;
-    void SetGlobalRwSyncQueueState(unsigned same_cnt, unsigned opposite_cnt);
-    bool GetMrdSwitchToRead() const;
-    bool GetMrdSwitchToWrite() const;
-    void SetMrdPeerState(unsigned peer_read_cnt, unsigned peer_write_cnt, bool peer_switch_to_read, bool peer_switch_to_write);
+    unsigned GetDmcAvailability() const;
+    unsigned GetDmcWriteAvailability() const;
     void update_group_state();
     void page_adapt_policy(Transaction *trans);
     void page_adpt_policy(Transaction *trans);
@@ -661,19 +660,7 @@ public:
     uint8_t lc_rw_met_type;
     bool global_rw_sync_valid;
     uint8_t global_rw_sync_type;
-    unsigned global_rw_sync_same_cnt;
-    unsigned global_rw_sync_opposite_cnt;
     unsigned pseudo_rw_conf_cnt;
-    unsigned mrd_rd_issue_gap;
-    unsigned mrd_wr_issue_gap;
-    bool mrd_switch_to_read;
-    bool mrd_switch_to_write;
-    unsigned mrd_peer_read_cnt;
-    unsigned mrd_peer_write_cnt;
-    bool mrd_peer_switch_to_read;
-    bool mrd_peer_switch_to_write;
-    bool mrd_bp_read_req;
-    bool mrd_bp_write_req;
     unsigned mrd_wr_availability;
 };
 }
