@@ -170,20 +170,8 @@ public:
     void faw_update();
     void page_timeout_policy();
     void update_rwgroup_state();
-    void SetRwSyncHint(bool valid, uint8_t target_group, bool block_new_rw);
-    void SetPseudoRwSyncHint(bool valid, uint8_t type, unsigned cnt);
-    bool HasRwIssue() const;
-    uint8_t GetRwIssueType() const;
-    bool HasRwReq() const;
-    uint8_t GetRwReqType() const;
-    bool HasLcRwMet() const;
-    uint8_t GetLcRwMetType() const;
-    bool HasPendingDfiRw() const;
-    uint8_t GetPendingDfiRwType() const;
-    void SetGlobalRwSyncDirection(bool valid, uint8_t type);
-    bool HasRwSyncTimeout() const;
-    bool HasReadyCasType(uint8_t type) const;
-    unsigned GetRwQueueCnt(uint8_t type) const;
+    void pre_evaluate_rw_sync();
+    void apply_rw_sync_group(uint8_t group);
     unsigned GetDmcAvailability() const;
     unsigned GetDmcWriteAvailability() const;
     void update_group_state();
@@ -205,6 +193,12 @@ public:
             return ((DmcLog2(length, JEDEC_DATA_BUS_BITS)) / DMC_DATA_BUS_BITS);}
     unsigned Read_Cnt() {return que_read_cnt;};
     unsigned Write_Cnt() {return que_write_cnt;};
+    unsigned GetRwSyncReadCnt() const;
+    unsigned GetRwSyncWriteCnt() const;
+    unsigned GetRwSyncReadBubble() const;
+    unsigned GetRwSyncWriteBubble() const;
+    bool GetRwSyncSwitchReadFlag() const;
+    bool GetRwSyncSwitchWriteFlag() const;
     bool HasPendingWork() const;
     void PostCalcTiming();
     void calc_occ();
@@ -296,13 +290,6 @@ public:
     unsigned rw_switch_cnt;
     unsigned r2w_switch_cnt;
     unsigned w2r_switch_cnt;
-    uint64_t rw_sync_check_cnt;
-    uint64_t rw_sync_global_bp_cnt;
-    uint64_t rw_sync_pseudo_bp_cnt;
-    uint64_t rw_sync_read_block_write_cnt;
-    uint64_t rw_sync_write_block_read_cnt;
-    uint64_t rw_sync_read_block_read_cnt;
-    uint64_t rw_sync_write_block_write_cnt;
     unsigned rank_switch_cnt;
     unsigned sid_switch_cnt;
     unsigned dly_ex2000_cnt;
@@ -593,6 +580,14 @@ public:
     vector <uint64_t> pbr_hold_pre_time;
     unsigned rw_exec_cnt;
     unsigned table_use_cnt;
+    unsigned rw_sync_read_cnt;
+    unsigned rw_sync_write_cnt;
+    unsigned rw_sync_read_bubble_cnt;
+    unsigned rw_sync_write_bubble_cnt;
+    bool rw_sync_switch_read_flag;
+    bool rw_sync_switch_write_flag;
+    bool rw_sync_read_issued;
+    bool rw_sync_write_issued;
 
     vector<bool> rank_cmd_high_qos;
     vector<unsigned> rank_rhit_num;
@@ -647,20 +642,6 @@ public:
 
     uint8_t GetRwGroupTarget() const;
     uint8_t GetRwGroupCurrent() const;
-    bool rw_sync_hint_valid;
-    uint8_t rw_sync_hint_group;
-    bool rw_sync_block_new_rw;
-    bool rw_sync_allow_new_cas;
-    bool rw_sync_gray;
-    bool rw_issue_valid;
-    uint8_t rw_issue_type;
-    bool rw_req_valid;
-    uint8_t rw_req_type;
-    bool lc_rw_met_valid;
-    uint8_t lc_rw_met_type;
-    bool global_rw_sync_valid;
-    uint8_t global_rw_sync_type;
-    unsigned pseudo_rw_conf_cnt;
     unsigned mrd_wr_availability;
 };
 }
