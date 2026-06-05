@@ -70,10 +70,8 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     top_rdata_active = false;
     top_rdata_task = 0;
     top_rdata_remain = 0;
-    rw_sync_active_valid = false;
-    rw_sync_active_type = DATA_READ;
-    rw_sync_active_hold = 0;
-    rw_sync_opposite_hold = 0;
+    rw_sync_group_valid = false;
+    rw_sync_group_type = READ_GROUP;
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -116,7 +114,6 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     BA_SHIFT_DIR = cfg->getBool("BA_SHIFT_DIR");
     BA_SHIFT_BIT = cfg->getNumber("BA_SHIFT_BIT");
     SLOT_FIFO = cfg->getBool("SLOT_FIFO");
-    DMC_RW_SYNC_EN = cfg->getBool("DMC_RW_SYNC_EN");
     TIME_ASSERT_EN = cfg->getBool("TIME_ASSERT_EN");
 
     IniFilename = "parameter/" + SYSTEM_CONFIG + ".ini";
@@ -230,6 +227,10 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     CORE_CONCURR = cfg->getNumber("CORE_CONCURR");
     CORE_CONCURR_PRD = cfg->getNumber("CORE_CONCURR_PRD");
     GRP_RW_EN = cfg->getBool("GRP_RW_EN");
+    DMC_RW_SYNC_EN = cfg->getBool("DMC_RW_SYNC_EN");
+    icfg_rdwr_chg_gap = cfg->getNumber("icfg_rdwr_chg_gap");
+    icfg_mrd_wcmd_lvl2 = cfg->getNumber("icfg_mrd_wcmd_lvl2");
+    icfg_mrd_rcmd_lvl2 = cfg->getNumber("icfg_mrd_rcmd_lvl2");
     ENGRP_LEVEL = cfg->getNumber("ENGRP_LEVEL");
     EXGRP_LEVEL = cfg->getNumber("EXGRP_LEVEL");
     CMD_WLEVELL = cfg->getNumber("CMD_WLEVELL");
@@ -464,7 +465,6 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     GET_PARAM(GREEN_PATH_DIS, "GREEN_PATH_DIS", getBool);
     GET_PARAM(LQOS_BP_EN, "LQOS_BP_EN", getBool);
     GET_PARAM(LQOS_BP_LEVEL, "LQOS_BP_LEVEL", getUint);
-    GET_PARAM(DMC_RW_SYNC_EN, "DMC_RW_SYNC_EN", getBool);
     GET_PARAM(TIMEOUT_ENABLE, "TIMEOUT_ENABLE", getBool);
     GET_PARAM(MAP_CONFIG["TIMEOUT_PRI_RD"], "TIMEOUT_PRI_RD", getUintArray);
     GET_PARAM(MAP_CONFIG["TIMEOUT_PRI_WR"], "TIMEOUT_PRI_WR", getUintArray);
@@ -531,6 +531,10 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     GET_PARAM(CORE_CONCURR, "CORE_CONCURR", getUint);
     GET_PARAM(CORE_CONCURR_PRD, "CORE_CONCURR_PRD", getUint);
     GET_PARAM(GRP_RW_EN, "GRP_RW_EN", getBool);
+    GET_PARAM(DMC_RW_SYNC_EN, "DMC_RW_SYNC_EN", getBool);
+    GET_PARAM(icfg_rdwr_chg_gap, "icfg_rdwr_chg_gap", getUint);
+    GET_PARAM(icfg_mrd_wcmd_lvl2, "icfg_mrd_wcmd_lvl2", getUint);
+    GET_PARAM(icfg_mrd_rcmd_lvl2, "icfg_mrd_rcmd_lvl2", getUint);
     GET_PARAM(ENGRP_LEVEL, "ENGRP_LEVEL", getUint);
     GET_PARAM(EXGRP_LEVEL, "EXGRP_LEVEL", getUint);
     GET_PARAM(CMD_WLEVELL, "CMD_WLEVELL", getUint);
@@ -1078,102 +1082,44 @@ void LPMemorySystemTop::update() {
     }
 
     if (DMC_RW_SYNC_EN && NUM_CHANS >= 2) {
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            channels[i]->memoryController->SetGlobalRwSyncDirection(false, DATA_READ);
-            channels[i]->memoryController->SetPseudoRwSyncHint(false, DATA_READ, 0);
+        MemoryController *ctrl0 = channels[0]->memoryController;
+        MemoryController *ctrl1 = channels[1]->memoryController;
+        ctrl0->pre_evaluate_rw_sync();
+        ctrl1->pre_evaluate_rw_sync();
+
+        bool both_read_level = ctrl0->GetRwSyncReadCnt() >= icfg_mrd_rcmd_lvl2 && ctrl1->GetRwSyncReadCnt() >= icfg_mrd_rcmd_lvl2;
+        bool both_write_level = ctrl0->GetRwSyncWriteCnt() >= icfg_mrd_wcmd_lvl2 && ctrl1->GetRwSyncWriteCnt() >= icfg_mrd_wcmd_lvl2;
+        bool switch_read = both_read_level && (ctrl0->GetRwSyncSwitchReadFlag() || ctrl1->GetRwSyncSwitchReadFlag());
+        bool switch_write = both_write_level && (ctrl0->GetRwSyncSwitchWriteFlag() || ctrl1->GetRwSyncSwitchWriteFlag());
+        unsigned total_read = ctrl0->GetRwSyncReadCnt() + ctrl1->GetRwSyncReadCnt();
+        unsigned total_write = ctrl0->GetRwSyncWriteCnt() + ctrl1->GetRwSyncWriteCnt();
+        unsigned read_bubble = max(ctrl0->GetRwSyncReadBubble(), ctrl1->GetRwSyncReadBubble());
+        unsigned write_bubble = max(ctrl0->GetRwSyncWriteBubble(), ctrl1->GetRwSyncWriteBubble());
+        unsigned escape_gap = icfg_rdwr_chg_gap * 4;
+        bool has_read = total_read != 0;
+        bool has_write = total_write != 0;
+        bool escape_write = rw_sync_group_type == READ_GROUP && has_write &&
+                (read_bubble >= escape_gap || (total_read < icfg_mrd_rcmd_lvl2 && total_write >= icfg_mrd_wcmd_lvl2));
+        bool escape_read = rw_sync_group_type == WRITE_GROUP && has_read &&
+                (write_bubble >= escape_gap || (total_write < icfg_mrd_wcmd_lvl2 && total_read >= icfg_mrd_rcmd_lvl2));
+
+        if (!rw_sync_group_valid) {
+            rw_sync_group_valid = true;
+            rw_sync_group_type = both_read_level || !both_write_level ? READ_GROUP : WRITE_GROUP;
+        } else if (switch_read || escape_read || (rw_sync_group_type == WRITE_GROUP && !has_write && has_read)) {
+            rw_sync_group_type = READ_GROUP;
+        } else if (switch_write || escape_write || (rw_sync_group_type == READ_GROUP && !has_read && has_write)) {
+            rw_sync_group_type = WRITE_GROUP;
         }
 
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            channels[i]->update();
-        }
-
-        std::vector<bool> mc_req_read(NUM_CHANS, false);
-        std::vector<bool> mc_req_write(NUM_CHANS, false);
-        std::vector<bool> mc_met_read(NUM_CHANS, false);
-        std::vector<bool> mc_met_write(NUM_CHANS, false);
-        std::vector<bool> mc_timeout(NUM_CHANS, false);
-        unsigned queue_read_cnt = 0;
-        unsigned queue_write_cnt = 0;
-        bool issue_read = false;
-        bool issue_write = false;
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            MemoryController *mc = channels[i]->memoryController;
-            mc_timeout[i] = mc->HasRwSyncTimeout();
-            queue_read_cnt += mc->GetRwQueueCnt(DATA_READ);
-            queue_write_cnt += mc->GetRwQueueCnt(DATA_WRITE);
-            if (mc->HasRwReq()) {
-                if (mc->GetRwReqType() == DATA_READ) mc_req_read[i] = true;
-                else mc_req_write[i] = true;
-            }
-            if (mc->HasLcRwMet()) {
-                if (mc->GetLcRwMetType() == DATA_READ) mc_met_read[i] = true;
-                else mc_met_write[i] = true;
-            }
-            if (mc->HasRwIssue()) {
-                if (mc->GetRwIssueType() == DATA_READ) issue_read = true;
-                else issue_write = true;
-            }
-        }
-
-        bool any_read = false;
-        bool any_write = false;
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            any_read |= mc_req_read[i] || mc_met_read[i];
-            any_write |= mc_req_write[i] || mc_met_write[i];
-        }
-
-        bool observed_valid = issue_read ^ issue_write;
-        uint8_t observed_type = issue_read ? DATA_READ : DATA_WRITE;
-        if (!observed_valid && (any_read ^ any_write)) {
-            observed_valid = true;
-            observed_type = any_read ? DATA_READ : DATA_WRITE;
-        }
-
-        unsigned hold_min = MERGE_DATA_SIZE <= 128 ? 56 : 32;
-        unsigned opposite_min = MERGE_DATA_SIZE <= 128 ? 8 : 5;
-        if (!rw_sync_active_valid) {
-            if (observed_valid) {
-                rw_sync_active_valid = true;
-                rw_sync_active_type = observed_type;
-                rw_sync_active_hold = 0;
-                rw_sync_opposite_hold = 0;
-            }
-        } else {
-            rw_sync_active_hold ++;
-            bool active_has_queue = rw_sync_active_type == DATA_READ ? queue_read_cnt > 0 : queue_write_cnt > 0;
-            bool opposite_has_queue = rw_sync_active_type == DATA_READ ? queue_write_cnt > 0 : queue_read_cnt > 0;
-            bool opposite_observed = observed_valid && observed_type != rw_sync_active_type;
-            if (opposite_observed && opposite_has_queue) rw_sync_opposite_hold ++;
-            else if (!opposite_has_queue) rw_sync_opposite_hold = 0;
-            bool switch_by_empty = !active_has_queue && opposite_has_queue;
-            bool switch_by_hold = rw_sync_active_hold >= hold_min && rw_sync_opposite_hold >= opposite_min;
-            if (switch_by_empty || switch_by_hold) {
-                rw_sync_active_type = rw_sync_active_type == DATA_READ ? DATA_WRITE : DATA_READ;
-                rw_sync_active_hold = 0;
-                rw_sync_opposite_hold = 0;
-            }
-            if (!active_has_queue && !opposite_has_queue && !observed_valid) {
-                rw_sync_active_valid = false;
-                rw_sync_active_hold = 0;
-                rw_sync_opposite_hold = 0;
-            }
-        }
-
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            MemoryController *mc = channels[i]->memoryController;
-            mc->SetPseudoRwSyncHint(!mc_timeout[i] && rw_sync_active_valid, rw_sync_active_type, rw_sync_active_valid ? 4 : 0);
-        }
-
+        ctrl0->apply_rw_sync_group(rw_sync_group_type);
+        ctrl1->apply_rw_sync_group(rw_sync_group_type);
     } else {
-        for (size_t i = 0; i < NUM_CHANS; i++) {
-            channels[i]->memoryController->SetRwSyncHint(false, NO_GROUP, false);
-            channels[i]->memoryController->SetGlobalRwSyncDirection(false, DATA_READ);
-            channels[i]->update();
-        }
-        rw_sync_active_valid = false;
-        rw_sync_active_type = DATA_READ;
-        rw_sync_active_hold = 0;
-        rw_sync_opposite_hold = 0;
+        rw_sync_group_valid = false;
+    }
+
+    for (size_t i = 0; i < NUM_CHANS; i++) {
+        channels[i]->update();
     }
 
     if (RMW_ENABLE) {
