@@ -136,10 +136,8 @@ private:
     bool top_rdata_active;
     uint64_t top_rdata_task;
     unsigned top_rdata_remain;
-    bool rw_sync_active_valid;
-    uint8_t rw_sync_active_type;
-    unsigned rw_sync_active_hold;
-    unsigned rw_sync_opposite_hold;
+    bool rw_sync_group_valid;
+    uint8_t rw_sync_group_type;
     
     const size_t TOP_RESP_FIFO_DEPTH = 16;
 
