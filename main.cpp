@@ -35,7 +35,7 @@ unsigned sim_random_seed = 2;
 unsigned frontend_rw_remain = 0;
 bool frontend_rw_is_read = true;
 unsigned frontend_rw_channel = 0;
-const unsigned FRONTEND_RW_GROUP_LEN = 128;
+const unsigned FRONTEND_RW_GROUP_LEN = 64;
 std::vector<std::set<uint64_t>> SentReadTasks;
 std::vector<std::set<uint64_t>> SentWriteTasks;
 std::vector<std::set<uint64_t>> CompletedReadTasks;
