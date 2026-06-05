@@ -139,13 +139,6 @@ MemorySystem::MemorySystem(unsigned dmcId,unsigned hhaId,string log_suffix,ostre
     pre_row_hit_cnt = 0;
     pre_row_miss_cnt = 0;
     pre_rw_switch_cnt = 0;
-    pre_rw_sync_check_cnt = 0;
-    pre_rw_sync_global_bp_cnt = 0;
-    pre_rw_sync_pseudo_bp_cnt = 0;
-    pre_rw_sync_read_block_write_cnt = 0;
-    pre_rw_sync_write_block_read_cnt = 0;
-    pre_rw_sync_read_block_read_cnt = 0;
-    pre_rw_sync_write_block_write_cnt = 0;
     pre_rank_switch_cnt = 0;
     pre_sid_switch_cnt = 0;
     pre_refresh_pb_cnt = 0;
@@ -1721,37 +1714,6 @@ if (POWER_EN) {
     STATE_PRINTN(" | "<<setw(36)<<"Total all conf cnt"<<" : "<<total_conf<<endl);
     STATE_PRINTN(setw(36)<<"RW switch cnt"<<" : "<<setw(12)<<rw_switch_cnt - pre_rw_switch_cnt);
     STATE_PRINTN(" | "<<setw(36)<<"Total RW switch cnt"<<" : "<<rw_switch_cnt<<endl);
-    uint64_t rw_sync_check = memoryController->rw_sync_check_cnt - pre_rw_sync_check_cnt;
-    uint64_t rw_sync_global_bp = memoryController->rw_sync_global_bp_cnt - pre_rw_sync_global_bp_cnt;
-    uint64_t rw_sync_pseudo_bp = memoryController->rw_sync_pseudo_bp_cnt - pre_rw_sync_pseudo_bp_cnt;
-    uint64_t rw_sync_total_bp = rw_sync_global_bp + rw_sync_pseudo_bp;
-    uint64_t rw_sync_read_block_write = memoryController->rw_sync_read_block_write_cnt - pre_rw_sync_read_block_write_cnt;
-    uint64_t rw_sync_write_block_read = memoryController->rw_sync_write_block_read_cnt - pre_rw_sync_write_block_read_cnt;
-    uint64_t rw_sync_read_block_read = memoryController->rw_sync_read_block_read_cnt - pre_rw_sync_read_block_read_cnt;
-    uint64_t rw_sync_write_block_write = memoryController->rw_sync_write_block_write_cnt - pre_rw_sync_write_block_write_cnt;
-    float rw_sync_bp_rate = rw_sync_check == 0 ? 0 : float(rw_sync_total_bp) * 100 / rw_sync_check;
-    float rw_sync_rd_blk_wr_rate = rw_sync_check == 0 ? 0 : float(rw_sync_read_block_write) * 100 / rw_sync_check;
-    float rw_sync_wr_blk_rd_rate = rw_sync_check == 0 ? 0 : float(rw_sync_write_block_read) * 100 / rw_sync_check;
-    float rw_sync_rd_blk_rd_rate = rw_sync_check == 0 ? 0 : float(rw_sync_read_block_read) * 100 / rw_sync_check;
-    float rw_sync_wr_blk_wr_rate = rw_sync_check == 0 ? 0 : float(rw_sync_write_block_write) * 100 / rw_sync_check;
-    STATE_PRINTN(setw(36)<<"DMC RW sync check cnt"<<" : "<<setw(12)<<rw_sync_check);
-    STATE_PRINTN(" | "<<setw(36)<<"DMC RW sync BP cnt"<<" : "<<setw(12)<<rw_sync_total_bp);
-    STATE_PRINTN(" | "<<setw(36)<<"DMC RW sync BP rate"<<" : "<<setprecision(2)<<rw_sync_bp_rate<<"%"<<endl);
-    STATE_PRINTN(setw(36)<<"DMC RW sync global BP"<<" : "<<setw(12)<<rw_sync_global_bp);
-    STATE_PRINTN(" | "<<setw(36)<<"DMC RW sync pseudo BP"<<" : "<<setw(12)<<rw_sync_pseudo_bp);
-    STATE_PRINTN(" | "<<setw(36)<<"Total DMC RW sync BP"<<" : "<<memoryController->rw_sync_global_bp_cnt + memoryController->rw_sync_pseudo_bp_cnt<<endl);
-    STATE_PRINTN(setw(36)<<"Read phase block write"<<" : "<<setw(12)<<rw_sync_read_block_write);
-    STATE_PRINTN(" | "<<setw(36)<<"Rate"<<" : "<<setprecision(2)<<setw(8)<<rw_sync_rd_blk_wr_rate<<"% | "
-            <<setw(36)<<"Total"<<" : "<<memoryController->rw_sync_read_block_write_cnt<<endl);
-    STATE_PRINTN(setw(36)<<"Write phase block read"<<" : "<<setw(12)<<rw_sync_write_block_read);
-    STATE_PRINTN(" | "<<setw(36)<<"Rate"<<" : "<<setprecision(2)<<setw(8)<<rw_sync_wr_blk_rd_rate<<"% | "
-            <<setw(36)<<"Total"<<" : "<<memoryController->rw_sync_write_block_read_cnt<<endl);
-    STATE_PRINTN(setw(36)<<"Read phase block read"<<" : "<<setw(12)<<rw_sync_read_block_read);
-    STATE_PRINTN(" | "<<setw(36)<<"Rate"<<" : "<<setprecision(2)<<setw(8)<<rw_sync_rd_blk_rd_rate<<"% | "
-            <<setw(36)<<"Total"<<" : "<<memoryController->rw_sync_read_block_read_cnt<<endl);
-    STATE_PRINTN(setw(36)<<"Write phase block write"<<" : "<<setw(12)<<rw_sync_write_block_write);
-    STATE_PRINTN(" | "<<setw(36)<<"Rate"<<" : "<<setprecision(2)<<setw(8)<<rw_sync_wr_blk_wr_rate<<"% | "
-            <<setw(36)<<"Total"<<" : "<<memoryController->rw_sync_write_block_write_cnt<<endl);
     STATE_PRINTN(setw(36)<<"Rank switch cnt"<<" : "<<setw(12)<<rank_switch_cnt - pre_rank_switch_cnt);
     STATE_PRINTN(" | "<<setw(36)<<"Total rank switch cnt"<<" : "<<rank_switch_cnt<<endl);
     STATE_PRINTN(setw(36)<<"Sid switch cnt"<<" : "<<setw(12)<<sid_switch_cnt - pre_sid_switch_cnt);
@@ -2076,13 +2038,6 @@ if (POWER_EN) {
     pre_ecc_write_cnt = ecc_write_cnt;
     pre_merge_read_cnt = merge_read_cnt;
     pre_rw_switch_cnt = rw_switch_cnt;
-    pre_rw_sync_check_cnt = memoryController->rw_sync_check_cnt;
-    pre_rw_sync_global_bp_cnt = memoryController->rw_sync_global_bp_cnt;
-    pre_rw_sync_pseudo_bp_cnt = memoryController->rw_sync_pseudo_bp_cnt;
-    pre_rw_sync_read_block_write_cnt = memoryController->rw_sync_read_block_write_cnt;
-    pre_rw_sync_write_block_read_cnt = memoryController->rw_sync_write_block_read_cnt;
-    pre_rw_sync_read_block_read_cnt = memoryController->rw_sync_read_block_read_cnt;
-    pre_rw_sync_write_block_write_cnt = memoryController->rw_sync_write_block_write_cnt;
     pre_rank_switch_cnt = rank_switch_cnt;
     pre_sid_switch_cnt = sid_switch_cnt;
     pre_refresh_pb_cnt = refresh_pb_cnt;
