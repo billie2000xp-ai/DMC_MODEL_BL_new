@@ -161,13 +161,6 @@ public:
     unsigned pre_row_hit_cnt;
     unsigned pre_row_miss_cnt;
     unsigned pre_rw_switch_cnt;
-    uint64_t pre_rw_sync_check_cnt;
-    uint64_t pre_rw_sync_global_bp_cnt;
-    uint64_t pre_rw_sync_pseudo_bp_cnt;
-    uint64_t pre_rw_sync_read_block_write_cnt;
-    uint64_t pre_rw_sync_write_block_read_cnt;
-    uint64_t pre_rw_sync_read_block_read_cnt;
-    uint64_t pre_rw_sync_write_block_write_cnt;
     unsigned pre_rank_switch_cnt;
     unsigned pre_sid_switch_cnt;
     unsigned pre_refresh_pb_cnt;
