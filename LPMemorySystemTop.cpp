@@ -57,10 +57,10 @@ bool LPMemorySystemTop::DmcCallbackProxy::cmd_done(unsigned channel, uint64_t ta
 }
 
 #ifdef SYSARCH_PLATFORM
-LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string IniFilePath, string LogPath,
+LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string LogPath,
         HALib::Configurable* cfg) : hhaId(hhaId) {
 #else
-LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string IniFilePath, string LogPath,
+LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string LogPath,
         int argc, char *argv[]) : hhaId(hhaId) {
 #endif
     read_cb = NULL;
@@ -72,6 +72,8 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     top_rdata_remain = 0;
     rw_sync_group_valid = false;
     rw_sync_group_type = READ_GROUP;
+    rw_sync_serial_cmd_cnt = 0;
+    top_resp_fifo_depth = DEFAULT_TOP_RESP_FIFO_DEPTH;
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -228,6 +230,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     CORE_CONCURR_PRD = cfg->getNumber("CORE_CONCURR_PRD");
     GRP_RW_EN = cfg->getBool("GRP_RW_EN");
     DMC_RW_SYNC_EN = cfg->getBool("DMC_RW_SYNC_EN");
+    DMC_RW_SYNC_MODE = cfg->getNumber("DMC_RW_SYNC_MODE");
     icfg_rdwr_chg_gap = cfg->getNumber("icfg_rdwr_chg_gap");
     icfg_mrd_wcmd_lvl2 = cfg->getNumber("icfg_mrd_wcmd_lvl2");
     icfg_mrd_rcmd_lvl2 = cfg->getNumber("icfg_mrd_rcmd_lvl2");
@@ -532,6 +535,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     GET_PARAM(CORE_CONCURR_PRD, "CORE_CONCURR_PRD", getUint);
     GET_PARAM(GRP_RW_EN, "GRP_RW_EN", getBool);
     GET_PARAM(DMC_RW_SYNC_EN, "DMC_RW_SYNC_EN", getBool);
+    GET_PARAM(DMC_RW_SYNC_MODE, "DMC_RW_SYNC_MODE", getUint);
     GET_PARAM(icfg_rdwr_chg_gap, "icfg_rdwr_chg_gap", getUint);
     GET_PARAM(icfg_mrd_wcmd_lvl2, "icfg_mrd_wcmd_lvl2", getUint);
     GET_PARAM(icfg_mrd_rcmd_lvl2, "icfg_mrd_rcmd_lvl2", getUint);
@@ -649,11 +653,18 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     GET_PARAM(MERGE_DATA_SIZE, "MERGE_DATA_SIZE", getUint);
     GET_PARAM(WCMD_MERGE_EN, "WCMD_MERGE_EN", getBool);
     GET_PARAM(WRITE_MERGE_BUFFER_DEPTH, "WRITE_MERGE_BUFFER_DEPTH", getUint);
+    GET_PARAM(TOP_RESP_FIFO_DEPTH, "TOP_RESP_FIFO_DEPTH", getUint);
     GET_PARAM(UNPAIRED_TO_RMW_EN, "UNPAIRED_TO_RMW_EN", getBool);
+    top_resp_fifo_depth = TOP_RESP_FIFO_DEPTH;
 
     IniFilename = IniFilePath+"/"+DDR_TYPE+"_"+to_string(DMC_RATE)+"M"+DDR_MODE+".ini";
     if (hhaId == 0) DEBUG("== Loading device model file '"<<IniFilename<<"' ==");
     iniFile.open(IniFilename.c_str());
+    if (!iniFile.is_open()) {
+        IniFilename = IniFilePath+"/"+DDR_TYPE+"_"+to_string(DMC_RATE)+"M.ini";
+        if (hhaId == 0) DEBUG("== Loading device model file '"<<IniFilename<<"' ==");
+        iniFile.open(IniFilename.c_str());
+    }
     if (iniFile.is_open()) {
         IniReader::ReadIniFile(iniFile, false);
     } else {
@@ -928,8 +939,9 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string log_sufffix, string 
     }
     IniReader::CheckParameter();
 
+    string log_suffix = "_" + to_string(hhaId) + "_";
     for (size_t dmcId=0; dmcId<NUM_CHANS; dmcId++) {
-        MemorySystem *channel = new MemorySystem(dmcId, hhaId, log_sufffix, DDRSim_log ,LogPath);
+        MemorySystem *channel = new MemorySystem(dmcId, hhaId, log_suffix, DDRSim_log ,LogPath);
         channels.push_back(channel);
     }
 
@@ -967,21 +979,8 @@ void LPMemorySystemTop::init_callback_proxies() {
 bool LPMemorySystemTop::handle_read_data(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    if (top_rdata_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false; 
+    if (top_rdata_fifo.size() >= top_resp_fifo_depth) return false; 
 
-    if (RDATA_MERGE_EN) {
-        bool task_exists = false;
-        for (const auto &pkt : top_rdata_fifo) {
-            if (pkt.task == task) {
-                task_exists = true;
-                break;
-            }
-        }
-        unsigned chunk_beats = MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8);
-        if (chunk_beats == 0) chunk_beats = 1;
-        if (!task_exists && top_rdata_fifo.size() + chunk_beats > TOP_RESP_FIFO_DEPTH) return false;
-    }
-    
     top_rdata_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
@@ -989,7 +988,7 @@ bool LPMemorySystemTop::handle_read_data(unsigned dmc_id, unsigned channel, uint
 bool LPMemorySystemTop::handle_write_done(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    if (top_wresp_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false;
+    if (top_wresp_fifo.size() >= top_resp_fifo_depth) return false;
     top_wresp_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
@@ -997,7 +996,8 @@ bool LPMemorySystemTop::handle_write_done(unsigned dmc_id, unsigned channel, uin
 bool LPMemorySystemTop::handle_read_done(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    if (top_rresp_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false;
+    if (top_rresp_fifo.size() >= top_resp_fifo_depth) return false;
+    top_rdata_done[task] = true;
     top_rresp_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
@@ -1005,7 +1005,7 @@ bool LPMemorySystemTop::handle_read_done(unsigned dmc_id, unsigned channel, uint
 bool LPMemorySystemTop::handle_cmd_done(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)dmc_id;
-    if (top_cmdresp_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false;
+    if (top_cmdresp_fifo.size() >= top_resp_fifo_depth) return false;
     top_cmdresp_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
@@ -1087,33 +1087,89 @@ void LPMemorySystemTop::update() {
         ctrl0->pre_evaluate_rw_sync();
         ctrl1->pre_evaluate_rw_sync();
 
-        bool both_read_level = ctrl0->GetRwSyncReadCnt() >= icfg_mrd_rcmd_lvl2 && ctrl1->GetRwSyncReadCnt() >= icfg_mrd_rcmd_lvl2;
-        bool both_write_level = ctrl0->GetRwSyncWriteCnt() >= icfg_mrd_wcmd_lvl2 && ctrl1->GetRwSyncWriteCnt() >= icfg_mrd_wcmd_lvl2;
-        bool switch_read = both_read_level && (ctrl0->GetRwSyncSwitchReadFlag() || ctrl1->GetRwSyncSwitchReadFlag());
-        bool switch_write = both_write_level && (ctrl0->GetRwSyncSwitchWriteFlag() || ctrl1->GetRwSyncSwitchWriteFlag());
         unsigned total_read = ctrl0->GetRwSyncReadCnt() + ctrl1->GetRwSyncReadCnt();
         unsigned total_write = ctrl0->GetRwSyncWriteCnt() + ctrl1->GetRwSyncWriteCnt();
-        unsigned read_bubble = max(ctrl0->GetRwSyncReadBubble(), ctrl1->GetRwSyncReadBubble());
-        unsigned write_bubble = max(ctrl0->GetRwSyncWriteBubble(), ctrl1->GetRwSyncWriteBubble());
-        unsigned escape_gap = icfg_rdwr_chg_gap * 4;
         bool has_read = total_read != 0;
         bool has_write = total_write != 0;
-        bool escape_write = rw_sync_group_type == READ_GROUP && has_write &&
-                (read_bubble >= escape_gap || (total_read < icfg_mrd_rcmd_lvl2 && total_write >= icfg_mrd_wcmd_lvl2));
-        bool escape_read = rw_sync_group_type == WRITE_GROUP && has_read &&
-                (write_bubble >= escape_gap || (total_write < icfg_mrd_wcmd_lvl2 && total_read >= icfg_mrd_rcmd_lvl2));
+        bool local_fallback = true;
 
-        if (!rw_sync_group_valid) {
+        if (DMC_RW_SYNC_MODE == 1) {
             rw_sync_group_valid = true;
-            rw_sync_group_type = both_read_level || !both_write_level ? READ_GROUP : WRITE_GROUP;
-        } else if (switch_read || escape_read || (rw_sync_group_type == WRITE_GROUP && !has_write && has_read)) {
-            rw_sync_group_type = READ_GROUP;
-        } else if (switch_write || escape_write || (rw_sync_group_type == READ_GROUP && !has_read && has_write)) {
-            rw_sync_group_type = WRITE_GROUP;
+            rw_sync_group_type = ctrl0->predict_rw_sync_group();
+        } else if (DMC_RW_SYNC_MODE == 2) {
+            uint8_t group0 = ctrl0->predict_rw_sync_group();
+            uint8_t group1 = ctrl1->predict_rw_sync_group();
+            rw_sync_group_valid = true;
+            if (group0 == READ_GROUP || group1 == READ_GROUP) {
+                rw_sync_group_type = READ_GROUP;
+            } else if (group0 == WRITE_GROUP || group1 == WRITE_GROUP) {
+                rw_sync_group_type = WRITE_GROUP;
+            } else {
+                rw_sync_group_type = NO_GROUP;
+            }
+        } else if (DMC_RW_SYNC_MODE == 3) {
+            unsigned cmd_wlevell = CMD_WLEVELL * 2;
+            unsigned cmd_wlevelh = CMD_WLEVELH * 2;
+            unsigned cmd_rlevell = CMD_RLEVELL * 2;
+            unsigned cmd_rlevelh = CMD_RLEVELH * 2;
+            unsigned serial_rlevell = SERIAL_RLEVELL * 2;
+            unsigned serial_rlevelh = SERIAL_RLEVELH * 2;
+            unsigned serial_wlevell = SERIAL_WLEVELL * 2;
+            unsigned serial_wlevelh = SERIAL_WLEVELH * 2;
+            unsigned rlevel_r2w = RLEVEL_R2W * 2;
+            unsigned alevel_w2r = ALEVEL_W2R * 2;
+            unsigned enter_level = ENGRP_LEVEL * 2;
+            unsigned exit_level = EXGRP_LEVEL * 2;
+            unsigned total_qsize = ctrl0->Read_Cnt() + ctrl0->Write_Cnt() + ctrl1->Read_Cnt() + ctrl1->Write_Cnt();
+            unsigned total_que_read = ctrl0->Read_Cnt() + ctrl1->Read_Cnt();
+            unsigned total_que_write = ctrl0->Write_Cnt() + ctrl1->Write_Cnt();
+            unsigned total_availability = max(ctrl0->GetDmcAvailability(), ctrl1->GetDmcAvailability());
+            bool stat_quc_rhit_high = false;
+            bool nonflat_r2w_pre = stat_quc_rhit_high ? (total_que_read < cmd_rlevell) :
+                    (total_que_write >= cmd_wlevelh && total_que_read <= rlevel_r2w);
+            bool nonflat_w2r_pre = stat_quc_rhit_high ? (total_que_read > cmd_rlevelh) :
+                    ((total_que_write <= cmd_wlevell) || ((total_que_read + total_que_write) <= alevel_w2r && (IS_HBM2E || IS_HBM3)));
+
+            if (!rw_sync_group_valid) {
+                rw_sync_group_valid = true;
+                rw_sync_group_type = NO_GROUP;
+            } else if (rw_sync_group_type == NO_GROUP) {
+                if (total_qsize >= enter_level) {
+                    rw_sync_group_type = total_que_write >= cmd_wlevelh || !has_read ? WRITE_GROUP : READ_GROUP;
+                    rw_sync_serial_cmd_cnt = 0;
+                }
+            } else if (rw_sync_group_type == READ_GROUP) {
+                if (total_qsize < exit_level && total_availability <= RWGRP_AUTO_BW) {
+                    rw_sync_group_type = NO_GROUP;
+                    rw_sync_serial_cmd_cnt = 0;
+                } else if (((rw_sync_serial_cmd_cnt >= serial_rlevell && nonflat_r2w_pre) ||
+                        rw_sync_serial_cmd_cnt >= serial_rlevelh || !has_read) && has_write) {
+                    rw_sync_group_type = WRITE_GROUP;
+                    rw_sync_serial_cmd_cnt = 0;
+                } else if (has_read) {
+                    rw_sync_serial_cmd_cnt++;
+                }
+            } else if (rw_sync_group_type == WRITE_GROUP) {
+                if (total_qsize < exit_level && total_availability <= RWGRP_AUTO_BW) {
+                    rw_sync_group_type = NO_GROUP;
+                    rw_sync_serial_cmd_cnt = 0;
+                } else if (((rw_sync_serial_cmd_cnt >= serial_wlevell && nonflat_w2r_pre) ||
+                        rw_sync_serial_cmd_cnt >= serial_wlevelh || !has_write) && has_read) {
+                    rw_sync_group_type = READ_GROUP;
+                    rw_sync_serial_cmd_cnt = 0;
+                } else if (has_write) {
+                    rw_sync_serial_cmd_cnt++;
+                }
+            } else {
+                rw_sync_group_type = READ_GROUP;
+            }
+        } else {
+            rw_sync_group_valid = true;
+            rw_sync_group_type = ctrl0->predict_rw_sync_group();
         }
 
-        ctrl0->apply_rw_sync_group(rw_sync_group_type);
-        ctrl1->apply_rw_sync_group(rw_sync_group_type);
+        ctrl0->apply_rw_sync_group(rw_sync_group_type, local_fallback);
+        ctrl1->apply_rw_sync_group(rw_sync_group_type, local_fallback);
     } else {
         rw_sync_group_valid = false;
     }
@@ -1142,17 +1198,23 @@ void LPMemorySystemTop::update() {
     if (!top_rdata_fifo.empty()) {
         size_t idx = 0;
         if (!top_rdata_active) {
-            top_rdata_remain = RDATA_MERGE_EN ? (MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8)) : 1;
-            if (top_rdata_remain == 0) top_rdata_remain = 1;
+            unsigned target_beats = RDATA_MERGE_EN ? (MERGE_DATA_SIZE / (DMC_DATA_BUS_BITS / 8)) : 1;
+            if (target_beats == 0) target_beats = 1;
+            top_rdata_remain = target_beats;
             for (size_t cand = 0; cand < top_rdata_fifo.size(); cand++) {
                 unsigned ready_beats = 0;
                 uint64_t cand_task = top_rdata_fifo[cand].task;
                 for (const auto &pkt : top_rdata_fifo) {
                     if (pkt.task == cand_task) ready_beats++;
                 }
-                if (ready_beats >= top_rdata_remain) {
+                auto expected_it = top_rdata_expected.find(cand_task);
+                unsigned cand_target_beats = target_beats;
+                if (expected_it != top_rdata_expected.end()) cand_target_beats = min(cand_target_beats, expected_it->second);
+                if (ready_beats >= cand_target_beats ||
+                        (RDATA_MERGE_EN && top_rdata_fifo.size() >= top_resp_fifo_depth && ready_beats != 0)) {
                     top_rdata_task = cand_task;
                     idx = cand;
+                    top_rdata_remain = min(cand_target_beats, ready_beats);
                     top_rdata_active = true;
                     break;
                 }
@@ -1167,7 +1229,11 @@ void LPMemorySystemTop::update() {
             TopRespPacket pkt = top_rdata_fifo[idx];
             if (read_cb == NULL || (*read_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
                 top_rdata_fifo.erase(top_rdata_fifo.begin() + idx);
-                if (--top_rdata_remain == 0) top_rdata_active = false;
+                if (--top_rdata_remain == 0) {
+                    top_rdata_active = false;
+                    top_rdata_done.erase(pkt.task);
+                    top_rdata_expected.erase(pkt.task);
+                }
             }
         }
     }
@@ -1248,6 +1314,8 @@ bool LPMemorySystemTop::addTransaction(const hha_command &command) {
 
     if (!ret){
         delete trans;
+    } else if (command.type == DATA_READ) {
+        top_rdata_expected[command.task] = command.burst_length + 1;
     }
     
     return ret;
