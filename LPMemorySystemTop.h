@@ -40,10 +40,10 @@ struct data_message {
 class LPMemorySystemTop : public SimulatorObject {
 public:
 #ifdef SYSARCH_PLATFORM
-    LPMemorySystemTop(unsigned id, string log_sufffix = "_0_0_", string IniFilePath = "./parameter", string LogPath = "./log",
+    LPMemorySystemTop(unsigned id, string IniFilePath = "./parameter", string LogPath = "./log",
             HALib::Configurable* cfg = NULL);
 #else
-    LPMemorySystemTop(unsigned id, string log_sufffix = "_0_0_", string IniFilePath = "./parameter", string LogPath = "./log",
+    LPMemorySystemTop(unsigned id, string IniFilePath = "./parameter", string LogPath = "./log",
             int argc = 0, char *argv[] = NULL);
 #endif
     virtual ~LPMemorySystemTop();
@@ -133,13 +133,17 @@ private:
     std::deque<TopRespPacket> top_wresp_fifo;
     std::deque<TopRespPacket> top_rresp_fifo;
     std::deque<TopRespPacket> top_cmdresp_fifo;
+    std::map<uint64_t, bool> top_rdata_done;
+    std::map<uint64_t, unsigned> top_rdata_expected;
     bool top_rdata_active;
     uint64_t top_rdata_task;
     unsigned top_rdata_remain;
     bool rw_sync_group_valid;
     uint8_t rw_sync_group_type;
+    unsigned rw_sync_serial_cmd_cnt;
+    size_t top_resp_fifo_depth;
     
-    const size_t TOP_RESP_FIFO_DEPTH = 16;
+    const size_t DEFAULT_TOP_RESP_FIFO_DEPTH = 16;
 
     vector<TransactionCompleteCB *> proxy_read_cbs;
     vector<TransactionCompleteCB *> proxy_write_cbs;
