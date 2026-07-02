@@ -171,7 +171,8 @@ public:
     void page_timeout_policy();
     void update_rwgroup_state();
     void pre_evaluate_rw_sync();
-    void apply_rw_sync_group(uint8_t group);
+    uint8_t predict_rw_sync_group();
+    void apply_rw_sync_group(uint8_t group, bool allow_local_fallback = false);
     unsigned GetDmcAvailability() const;
     unsigned GetDmcWriteAvailability() const;
     void update_group_state();
