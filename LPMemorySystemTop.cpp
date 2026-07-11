@@ -348,6 +348,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     MERGE_DATA_SIZE = cfg->getNumber("MERGE_DATA_SIZE");
     WCMD_MERGE_EN = cfg->getBool("WCMD_MERGE_EN");
     WRITE_MERGE_BUFFER_DEPTH = cfg->getNumber("WRITE_MERGE_BUFFER_DEPTH");
+    WCMD_MERGE_TIMEOUT = cfg->getNumber("WCMD_MERGE_TIMEOUT");
     UNPAIRED_TO_RMW_EN = cfg->getBool("UNPAIRED_TO_RMW_EN");
 
     IniFilename = "parameter/" + DDR_TYPE + "_" + to_string(DMC_RATE) + "M" + DDR_MODE + ".ini";
@@ -653,6 +654,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     GET_PARAM(MERGE_DATA_SIZE, "MERGE_DATA_SIZE", getUint);
     GET_PARAM(WCMD_MERGE_EN, "WCMD_MERGE_EN", getBool);
     GET_PARAM(WRITE_MERGE_BUFFER_DEPTH, "WRITE_MERGE_BUFFER_DEPTH", getUint);
+    GET_PARAM(WCMD_MERGE_TIMEOUT, "WCMD_MERGE_TIMEOUT", getUint);
     GET_PARAM(TOP_RESP_FIFO_DEPTH, "TOP_RESP_FIFO_DEPTH", getUint);
     GET_PARAM(UNPAIRED_TO_RMW_EN, "UNPAIRED_TO_RMW_EN", getBool);
     top_resp_fifo_depth = TOP_RESP_FIFO_DEPTH;
@@ -943,9 +945,10 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     for (size_t dmcId=0; dmcId<NUM_CHANS; dmcId++) {
         MemorySystem *channel = new MemorySystem(dmcId, hhaId, log_suffix, DDRSim_log ,LogPath);
         channels.push_back(channel);
+        rmws.push_back(new Rmw(this, dmcId, hhaId * NUM_CHANS + dmcId, DDRSim_log, LogPath));
     }
 
-    rmw = new Rmw(this, hhaId, DDRSim_log, LogPath);
+    rmw = rmws.empty() ? NULL : rmws[0];
     init_callback_proxies();
 
     string ddr_type;
@@ -978,27 +981,24 @@ void LPMemorySystemTop::init_callback_proxies() {
 
 bool LPMemorySystemTop::handle_read_data(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
-    (void)dmc_id;
     if (top_rdata_fifo.size() >= top_resp_fifo_depth) return false; 
 
-    top_rdata_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
+    top_rdata_fifo.push_back({hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
 
 bool LPMemorySystemTop::handle_write_done(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
-    (void)dmc_id;
     if (top_wresp_fifo.size() >= top_resp_fifo_depth) return false;
-    top_wresp_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
+    top_wresp_fifo.push_back({hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
 
 bool LPMemorySystemTop::handle_read_done(unsigned dmc_id, unsigned channel, uint64_t task,
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
-    (void)dmc_id;
     if (top_rresp_fifo.size() >= top_resp_fifo_depth) return false;
     top_rdata_done[task] = true;
-    top_rresp_fifo.push_back({channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
+    top_rresp_fifo.push_back({hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
     return true;
 }
 
@@ -1048,9 +1048,13 @@ string FilenameWithNumberSuffix(const string &filename, const string &extension,
 
 LPMemorySystemTop::~LPMemorySystemTop() {
     
-    rmw->register_write(4,0);
-    rmw->register_write(0,0);
-    delete rmw;
+    for (auto rmw_inst : rmws) {
+        rmw_inst->register_write(4,0);
+        rmw_inst->register_write(0,0);
+        delete rmw_inst;
+    }
+    rmws.clear();
+    rmw = NULL;
 
     for (size_t i=0; i<NUM_CHANS; i++) {
         delete channels[i];
@@ -1077,8 +1081,10 @@ LPMemorySystemTop::~LPMemorySystemTop() {
 }
 
 void LPMemorySystemTop::update() {
-    if (RMW_ENABLE) {
-        rmw->update();
+    if (RMW_ENABLE || WCMD_MERGE_EN) {
+        for (auto rmw_inst : rmws) {
+            rmw_inst->update();
+        }
     }
 
     if (DMC_RW_SYNC_EN && NUM_CHANS >= 2) {
@@ -1095,10 +1101,10 @@ void LPMemorySystemTop::update() {
 
         if (DMC_RW_SYNC_MODE == 1) {
             rw_sync_group_valid = true;
-            rw_sync_group_type = ctrl0->predict_rw_sync_group();
+            rw_sync_group_type = ctrl0->GetPreRwGroupState();
         } else if (DMC_RW_SYNC_MODE == 2) {
-            uint8_t group0 = ctrl0->predict_rw_sync_group();
-            uint8_t group1 = ctrl1->predict_rw_sync_group();
+            uint8_t group0 = ctrl0->GetPreRwGroupState();
+            uint8_t group1 = ctrl1->GetPreRwGroupState();
             rw_sync_group_valid = true;
             if (group0 == READ_GROUP || group1 == READ_GROUP) {
                 rw_sync_group_type = READ_GROUP;
@@ -1165,7 +1171,7 @@ void LPMemorySystemTop::update() {
             }
         } else {
             rw_sync_group_valid = true;
-            rw_sync_group_type = ctrl0->predict_rw_sync_group();
+            rw_sync_group_type = ctrl0->GetPreRwGroupState();
         }
 
         ctrl0->apply_rw_sync_group(rw_sync_group_type, local_fallback);
@@ -1178,19 +1184,25 @@ void LPMemorySystemTop::update() {
         channels[i]->update();
     }
 
-    if (RMW_ENABLE) {
-        rmw->step();
+    if (RMW_ENABLE || WCMD_MERGE_EN) {
+        for (auto rmw_inst : rmws) {
+            rmw_inst->step();
+        }
     }
     step();
 
     //statistics for RMW
     if (STATE_TIME != 0) {
         if ((now() % STATE_TIME) == 0) {
-            rmw->register_write(4,0);
-            rmw->register_write(0,0);
+            for (auto rmw_inst : rmws) {
+                rmw_inst->register_write(4,0);
+                rmw_inst->register_write(0,0);
+            }
         }
     }
-    rmw->check_cnt();
+    for (auto rmw_inst : rmws) {
+        rmw_inst->check_cnt();
+    }
 
     // Top 层的串行化向上游发送逻辑 (仲裁与汇聚吐出)
     // 1. 吐出 Read Data
@@ -1285,13 +1297,14 @@ void LPMemorySystemTop::noc_read_inform(uint8_t channel, bool fast_wakeup_rank0,
 bool LPMemorySystemTop::addTransaction(const hha_command &command) {
     command_check(command);
     uint8_t ch = addr_map_ch(command);
+    Rmw *target_rmw = (EM_ENABLE && EM_MODE==0) ? rmws[0] : rmws[ch];
 
     //GRANT FIFO BP under LP6 Nomal mode
     if (!EM_ENABLE && IS_LP6 && channels[1]->memoryController->grt_fifo_bp) {
         return false;
     }
 
-    if (RMW_ENABLE && rmw->pre_req_time == rmw->now()) {
+    if ((RMW_ENABLE || WCMD_MERGE_EN) && target_rmw->pre_req_time == target_rmw->now()) {
         return false;
     }
 
@@ -1302,8 +1315,8 @@ bool LPMemorySystemTop::addTransaction(const hha_command &command) {
     addressMapping(*trans);
     trans_check(trans);
     
-    if (RMW_ENABLE && !trans->pre_act) {
-        ret = rmw->addTransaction(trans);
+    if ((RMW_ENABLE || WCMD_MERGE_EN) && !trans->pre_act) {
+        ret = target_rmw->addTransaction(trans);
     } else {
         if (EM_ENABLE && EM_MODE==0) {
             ret = channels[0]->addTransaction(trans);
@@ -1361,15 +1374,16 @@ uint32_t LPMemorySystemTop::getDmcPressureLevel() {
 }
 
 bool LPMemorySystemTop::addData(uint32_t *data,uint32_t channel,uint64_t id) {
-    if (RMW_ENABLE && rmw->pre_req_data_time == rmw->now()) {
+    if (EM_ENABLE && EM_MODE==0) channel = 0;
+    Rmw *target_rmw = rmws[channel];
+
+    if ((RMW_ENABLE || WCMD_MERGE_EN) && target_rmw->pre_req_data_time == target_rmw->now()) {
         return false;
     }
     
-    if (EM_ENABLE && EM_MODE==0) channel = 0;
-    
     bool ret = false;
-    if (RMW_ENABLE) {
-        ret = rmw->addData(data, channel, id); 
+    if (RMW_ENABLE || WCMD_MERGE_EN) {
+        ret = target_rmw->addData(data, channel, id); 
     } else {
         ret = channels[channel]->addData(data, id, false);
     }
@@ -1421,13 +1435,17 @@ void LPMemorySystemTop::GetDmcBusyStatus(uint8_t channel, bool *dmc_busy) {
 }
 
 uint32_t LPMemorySystemTop::getRmwQueueCmdNum() const{
-    return rmw->rmw_cmd_cnt;
+    uint32_t rmw_cmd_cnt = 0;
+    for (auto rmw_inst : rmws) {
+        rmw_cmd_cnt += rmw_inst->rmw_cmd_cnt;
+    }
+    return rmw_cmd_cnt;
 }
 
-bool LPMemorySystemTop::emit_write_done(unsigned channel, uint64_t task, double readDataEnterDmcTime,
+bool LPMemorySystemTop::emit_write_done(unsigned dmc_id, unsigned channel, uint64_t task, double readDataEnterDmcTime,
         double reqAddToDmcTime, double reqEnterDmcBufTime) {
     if (write_cb == NULL) return true;
-    return (*write_cb)(channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime);
+    return (*write_cb)(hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime);
 }
 
 uint8_t LPMemorySystemTop::addr_map_ch(const hha_command &c) {
