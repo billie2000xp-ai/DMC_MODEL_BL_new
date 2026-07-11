@@ -93,6 +93,7 @@ public:
     void GetDmcBusyStatus(uint8_t channel, bool *dmc_busy);
     vector<MemorySystem*> channels;
     Rmw *rmw;
+    vector<Rmw*> rmws;
 
 private:
     class DmcCallbackProxy {
