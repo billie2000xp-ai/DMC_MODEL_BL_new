@@ -184,7 +184,7 @@ class Rmw:public SimulatorObject {
     void update_write_merge_resp();
     bool write_merge_response(uint64_t task, uint8_t channel);
     void rebuild_conflict_state();
-    bool is_unpaired_write_merge_timeout(Transaction *trans);
+    bool is_unpaired_write_merge_timeout(Transaction *trans, cmd_state *state);
 
     std::map<uint64_t, uint64_t> write_merge_first_resp_task;
     std::map<uint64_t, uint8_t> write_merge_first_resp_channel;
