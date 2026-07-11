@@ -1,10 +1,3 @@
-/*
-* Copyright @ Huawei Technologies Co., Ltd. 2024-2034. All rights reserved.
-* Description: Rmw.h
-* Author: z00831990
-* Create: 2024-6-12
-*/
-
 #ifndef _RMW_H
 #define _RMW_H
 
@@ -14,7 +7,6 @@
 #include <stdint.h>
 #include <ostream>
 #include <cstring>
-#include <deque>
 #include <map>
 #include "Callback.h"
 #include "SimulatorObject.h"
@@ -56,10 +48,9 @@ class Rmw:public SimulatorObject {
     };
 
     public:
-    Rmw(LPMemorySystemTop *_top, unsigned id, ostream &DDRSim_log_, string LogPath);
+    Rmw(LPMemorySystemTop *_top, unsigned id, unsigned log_id, ostream &DDRSim_log_, string LogPath);
     virtual ~Rmw() {};
     bool addTransaction(Transaction * trans);
-    bool addMergedWriteTransaction(Transaction *trans);
     void update_cresp();
     bool addData(uint32_t *data, uint32_t channel, uint64_t task);
     void RmwInitOutputFiles();
@@ -70,8 +61,10 @@ class Rmw:public SimulatorObject {
     void sch_que();
     void arb_node();
     void send_wdata();
+    bool hasPendingWork() const;
+    bool flushWriteMergeBuffer();
     unsigned rmw_cmd_cnt;
-    inline bool full() {return (rmw_cmd_cnt >= RMW_QUE_DEPTH);}
+    inline bool full() {return (RMW_QUE_DEPTH != 0 && rmw_cmd_cnt >= RMW_QUE_DEPTH);}
     void func_check();
     void update_state();
 //    void trans_state_clr(Transaction *trans);
@@ -79,8 +72,6 @@ class Rmw:public SimulatorObject {
     uint64_t pre_req_data_time;    // time point for last wdata 
     std::vector<uint64_t> WdataToSend;
     std::vector<uint32_t> WdataChannel;
-    std::map<uint64_t, unsigned> MaskWriteDataBeats;
-    std::map<uint64_t, unsigned> MaskWriteSendBeats;
     std::vector<Transaction *> RmwQue;
 
     string rmw_log;
@@ -108,6 +99,11 @@ class Rmw:public SimulatorObject {
     unsigned totalFullWrites; 
     unsigned totalMaskWrites; 
     unsigned totalTransactions;
+    unsigned totalWriteMergeInput;
+    unsigned totalWriteMergePair;
+    unsigned totalWriteMergeUnpairedToRmw;
+    unsigned totalWriteMergeUnpairedDirect;
+    unsigned totalWriteMergeBufferFull;
     unsigned pre_reads; 
     unsigned pre_bypass_reads; 
     unsigned pre_bypass_writes; 
@@ -115,6 +111,11 @@ class Rmw:public SimulatorObject {
     unsigned pre_full_writes; 
     unsigned pre_mask_writes; 
     unsigned pre_totals; 
+    unsigned preWriteMergeInput;
+    unsigned preWriteMergePair;
+    unsigned preWriteMergeUnpairedToRmw;
+    unsigned preWriteMergeUnpairedDirect;
+    unsigned preWriteMergeBufferFull;
     
     vector<uint32_t> rmw_que_cnt;
     
@@ -123,67 +124,11 @@ class Rmw:public SimulatorObject {
 
     private:
 //    std::vector<Transaction *> RmwQue;
-    struct BufferedWriteEntry {
-        Transaction *first_trans;
-        Transaction *second_trans;
-        bool has_second;
-        uint64_t enter_time;
-
-        BufferedWriteEntry() {
-            first_trans = NULL;
-            second_trans = NULL;
-            has_second = false;
-            enter_time = 0;
-        }
-    };
-
-    struct WriteDataRoute {
-        uint64_t internal_task;
-        unsigned remaining_beats;
-        uint64_t resp_task;
-        unsigned resp_channel;
-        bool has_resp;
-
-        WriteDataRoute() {
-            internal_task = 0;
-            remaining_beats = 0;
-            resp_task = 0;
-            resp_channel = 0;
-            has_resp = false;
-        }
-    };
-
-    struct PendingWriteResp {
-        uint64_t external_task;
-        unsigned upstream_channel;
-
-        PendingWriteResp() {
-            external_task = 0;
-            upstream_channel = 0;
-        }
-    };
-
-    static const unsigned WRITE_MERGE_BUFFER_DEPTH = 16;
-    std::deque<BufferedWriteEntry> write_merge_buffer;
-    std::map<uint64_t, std::deque<WriteDataRoute> > write_data_routes;
-    std::map<uint64_t, unsigned> buffered_write_data_counts;
-    std::map<uint64_t, uint32_t> buffered_write_data_channels;
-    std::deque<PendingWriteResp> pending_write_merge_resps;
-    bool is_write_merge_candidate(const Transaction *trans) const;
-    bool can_merge_write_pair(const Transaction *first, const Transaction *second) const;
-    Transaction *build_merged_transaction(const BufferedWriteEntry &entry, uint64_t merged_task) const;
-    Transaction *build_rmw_256b_transaction(Transaction *trans) const;
-    bool dispatch_buffered_write(size_t entry_index);
-    void pump_write_merge_buffer();
-    bool is_task_buffered(uint64_t task) const;
-    void drain_buffered_write_data();
-    void enqueue_pending_write_resp(uint64_t external_task, unsigned upstream_channel);
-    void pump_pending_write_resps();
-    bool handle_write_merge_transaction(Transaction *trans);
     std::vector<conf_state *> RmwConfCnt;
     std::vector<cmd_state *> RmwCmdState;
     LPMemorySystemTop *top;
     unsigned channel;
+    unsigned log_channel;
     uint64_t channel_ohot;
 //    ostream &DDRSim_log;
     RMW_State rmw_state;
@@ -194,6 +139,56 @@ class Rmw:public SimulatorObject {
     string log_path;
     unsigned rcmd_cnt;
     unsigned wcmd_cnt;
+
+    struct WriteMergeEntry {
+        Transaction *first_trans;
+        Transaction *second_trans;
+        unsigned first_data_ready_cnt;
+        unsigned second_data_ready_cnt;
+        bool has_second;
+        uint64_t enqueue_time;
+        uint8_t upstream_channel;
+        WriteMergeEntry();
+    };
+
+    struct PendingWriteMergeResp {
+        uint64_t task;
+        uint8_t channel;
+        uint64_t wait_data_task;
+        PendingWriteMergeResp(uint64_t task_, uint8_t channel_, uint64_t wait_data_task_ = 0xffffffffffffffffull);
+    };
+
+    struct WriteMergeDataRemap {
+        uint64_t src_task;
+        uint64_t dst_task;
+        unsigned remaining_beats;
+        WriteMergeDataRemap(uint64_t src_task_, uint64_t dst_task_, unsigned remaining_beats_);
+    };
+
+    std::vector<WriteMergeEntry> write_merge_buffer;
+    std::vector<PendingWriteMergeResp> pending_write_merge_resps;
+    std::vector<WriteMergeDataRemap> write_merge_data_remaps;
+    std::map<uint64_t, unsigned> pending_write_data_cnt;
+    uint64_t pre_write_merge_resp_time;
+
+    bool is_write_merge_candidate(const Transaction *trans) const;
+    bool can_merge_write_pair(const Transaction *first, const Transaction *second) const;
+    Transaction *build_merged_write_transaction(Transaction *first, Transaction *second, uint64_t merged_task, bool mask_wcmd);
+    bool handle_write_merge_transaction(Transaction *trans);
+    bool dispatch_write_merge_entry(size_t index, bool force_mask_wcmd);
+    bool pump_write_merge_buffer();
+    bool flush_one_write_merge_entry();
+    bool remap_write_merge_data(uint32_t *data, uint64_t task);
+    bool is_write_merge_data_task(uint64_t task) const;
+    bool add_write_merge_data(uint32_t *data, uint64_t task);
+    void update_write_merge_resp();
+    bool write_merge_response(uint64_t task, uint8_t channel);
+    void rebuild_conflict_state();
+    bool is_unpaired_write_merge_timeout(Transaction *trans);
+
+    std::map<uint64_t, uint64_t> write_merge_first_resp_task;
+    std::map<uint64_t, uint8_t> write_merge_first_resp_channel;
+    std::map<uint64_t, bool> write_merge_unpaired_direct_accounted;
 
 //    public:
 //    unsigned push_cnt;
