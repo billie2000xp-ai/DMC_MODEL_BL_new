@@ -534,7 +534,7 @@ bool MemorySystem::handle_write_merge_transaction(Transaction *trans) {
             paired_tail.paired_tail = true;
             paired_tail.upstream_channel = channel;
             write_merge_buffer.insert(write_merge_buffer.begin() + i + 1, paired_tail);
-            if (write_merge_buffer.size() > WRITE_MERGE_TIMEOUT) {
+            if (write_merge_buffer.size() > WCMD_MERGE_TIMEOUT) {
                 flush_one_write_merge_entry();
             }
             // if (DEBUG_BUS) {
@@ -547,7 +547,7 @@ bool MemorySystem::handle_write_merge_transaction(Transaction *trans) {
             return true;
         }
     }
-    if (write_merge_buffer.size() >= WRITE_MERGE_TIMEOUT) {
+    if (write_merge_buffer.size() >= WCMD_MERGE_TIMEOUT) {
         totalWriteMergeBufferFull++;
         if (DEBUG_BUS) {
             PRINTN(setw(10)<<now()<<" -- WCMERGE_BUF_FULL :: incoming_task="<<trans->task
@@ -562,7 +562,7 @@ bool MemorySystem::handle_write_merge_transaction(Transaction *trans) {
     write_merge_buffer.push_back(entry);
     if (DEBUG_BUS) {
         PRINTN(setw(10)<<now()<<" -- WCMERGE_BUF_ADD :: task="<<trans->task<<" addr=0x"<<hex<<trans->address<<dec
-                <<" used="<<write_merge_buffer.size()<<" depth="<<WRITE_MERGE_TIMEOUT<<endl);
+                <<" used="<<write_merge_buffer.size()<<" depth="<<WCMD_MERGE_TIMEOUT<<endl);
     }
     return true;
 }
