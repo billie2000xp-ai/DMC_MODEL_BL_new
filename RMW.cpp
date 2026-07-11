@@ -460,10 +460,10 @@ void Rmw::rebuild_conflict_state() {
     }
 }
 
-bool Rmw::is_unpaired_write_merge_timeout(Transaction *trans) {
+bool Rmw::is_unpaired_write_merge_timeout(Transaction *trans, cmd_state *state) {
     if (!is_write_merge_candidate(trans)) return false;
     if (WCMD_MERGE_TIMEOUT == 0) return false;
-    return now() - trans->timeAdded >= WCMD_MERGE_TIMEOUT;
+    return now() - state->rmwTimeAdded >= WCMD_MERGE_TIMEOUT;
 }
 
 bool Rmw::remap_write_merge_data(uint32_t *data, uint64_t task) {
@@ -826,7 +826,7 @@ void Rmw::sch_que() {
         if ((RmwQue[i]->transactionType==DATA_WRITE) && (RmwQue[i]->mask_wcmd==false)) {
             if(RmwQue[i]->data_ready_cnt >= (RmwQue[i]->burst_length + 1)) {
                 bool unpaired_write_merge = is_write_merge_candidate(RmwQue[i]);
-                if (unpaired_write_merge && !is_unpaired_write_merge_timeout(RmwQue[i])) {
+                if (unpaired_write_merge && !is_unpaired_write_merge_timeout(RmwQue[i], RmwCmdState[i])) {
                     continue;
                 }
                 if (unpaired_write_merge && UNPAIRED_TO_RMW_EN) {
