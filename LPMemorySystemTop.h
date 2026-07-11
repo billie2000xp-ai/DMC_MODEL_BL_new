@@ -68,7 +68,7 @@ public:
 
     uint32_t getTransQueSize(uint32_t dmc_id, bool isRd);
     uint32_t getRmwQueueCmdNum() const;
-    bool emit_write_done(unsigned channel, uint64_t task, double readDataEnterDmcTime,
+    bool emit_write_done(unsigned dmc_id, unsigned channel, uint64_t task, double readDataEnterDmcTime,
         double reqAddToDmcTime, double reqEnterDmcBufTime);
 
     //output file
@@ -93,6 +93,7 @@ public:
     void GetDmcBusyStatus(uint8_t channel, bool *dmc_busy);
     vector<MemorySystem*> channels;
     Rmw *rmw;
+    vector<Rmw*> rmws;
 
 private:
     class DmcCallbackProxy {
