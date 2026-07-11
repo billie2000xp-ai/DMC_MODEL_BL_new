@@ -68,7 +68,7 @@ public:
 
     uint32_t getTransQueSize(uint32_t dmc_id, bool isRd);
     uint32_t getRmwQueueCmdNum() const;
-    bool emit_write_done(unsigned dmc_id, unsigned channel, uint64_t task, double readDataEnterDmcTime,
+    bool emit_write_done(unsigned channel, uint64_t task, double readDataEnterDmcTime,
         double reqAddToDmcTime, double reqEnterDmcBufTime);
 
     //output file
@@ -93,7 +93,6 @@ public:
     void GetDmcBusyStatus(uint8_t channel, bool *dmc_busy);
     vector<MemorySystem*> channels;
     Rmw *rmw;
-    vector<Rmw*> rmws;
 
 private:
     class DmcCallbackProxy {
@@ -128,28 +127,26 @@ private:
         double readDataEnterDmcTime;
         double reqAddToDmcTime;
         double reqEnterDmcBufTime;
+        // 记录这个 task 原始总共包含多少拍数据
+        // unsigned task_total_beats;
     };
+    std::map<uint64_t, unsigned> expected_read_beats_map;
 
     std::deque<TopRespPacket> top_rdata_fifo;
     std::deque<TopRespPacket> top_wresp_fifo;
     std::deque<TopRespPacket> top_rresp_fifo;
     std::deque<TopRespPacket> top_cmdresp_fifo;
-    std::map<uint64_t, bool> top_rdata_done;
-    std::map<uint64_t, unsigned> top_rdata_expected;
     bool top_rdata_active;
     uint64_t top_rdata_task;
     unsigned top_rdata_remain;
-    bool rw_sync_group_valid;
-    uint8_t rw_sync_group_type;
-    unsigned rw_sync_serial_cmd_cnt;
-    size_t top_resp_fifo_depth;
     
-    const size_t DEFAULT_TOP_RESP_FIFO_DEPTH = 16;
+    const size_t TOP_RESP_FIFO_DEPTH = 88;
 
     vector<TransactionCompleteCB *> proxy_read_cbs;
     vector<TransactionCompleteCB *> proxy_write_cbs;
     vector<TransactionCompleteCB *> proxy_read_done_cbs;
     vector<TransactionCompleteCB *> proxy_cmd_cbs;
+
     void command_check(const hha_command &c);
     void wdata_check(uint64_t task, uint8_t channel);
     uint8_t addr_map_ch(const hha_command &c);
