@@ -72,9 +72,12 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     top_rdata_remain = 0;
     rw_sync_group_valid = false;
     rw_sync_group = NO_GROUP;
+    rw_sync_group_state.assign(8, NO_GROUP);
+    rw_sync_in_write_group = false;
     rw_sync_serial_cmd_cnt = 0;
-    rw_sync_prev_reads = 0;
-    rw_sync_prev_writes = 0;
+    rw_sync_reverse_cmd_cnt = 0;
+    rw_sync_rw_cmd_num = 0;
+    rw_sync_act_cmd_num = 0;
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -1118,54 +1121,140 @@ void LPMemorySystemTop::update_rw_sync_group() {
             rw_sync_group = NO_GROUP;
         }
     } else if (DMC_RW_SYNC_MODE == 2) {
+        if (rw_sync_prev_snapshot.size() != NUM_CHANS) {
+            rw_sync_prev_snapshot.resize(NUM_CHANS);
+            for (size_t i = 0; i < NUM_CHANS; i++) {
+                rw_sync_prev_snapshot[i] = channels[i]->memoryController->GetRwGroupSnapshot();
+            }
+        }
         unsigned read_cnt = 0;
         unsigned write_cnt = 0;
         unsigned schedulable_read_cnt = 0;
         unsigned schedulable_write_cnt = 0;
         unsigned availability = 0;
+        unsigned high_qos_read_cnt = 0;
+        uint64_t read_retired_delta = 0;
+        uint64_t write_retired_delta = 0;
+        uint64_t rw_cmd_delta = 0;
+        uint64_t act_cmd_delta = 0;
+        bool timeout_read = false;
+        bool timeout_write = false;
         for (size_t i = 0; i < NUM_CHANS; i++) {
             MemoryController *ctrl = channels[i]->memoryController;
-            read_cnt += ctrl->Read_Cnt();
-            write_cnt += ctrl->Write_Cnt();
-            schedulable_read_cnt += ctrl->SchedulableReadCnt();
-            schedulable_write_cnt += ctrl->SchedulableWriteCnt();
-            availability = max(availability, ctrl->availability);
+            MemoryController::RwGroupSnapshot current = ctrl->GetRwGroupSnapshot();
+            MemoryController::RwGroupSnapshot &previous = rw_sync_prev_snapshot[i];
+            read_cnt += current.read_cnt;
+            write_cnt += current.write_cnt;
+            schedulable_read_cnt += current.schedulable_read_cnt;
+            schedulable_write_cnt += current.schedulable_write_cnt;
+            availability = max(availability, current.availability);
+            high_qos_read_cnt += current.high_qos_read_cnt;
+            read_retired_delta += current.read_retired_total - previous.read_retired_total;
+            write_retired_delta += current.write_retired_total - previous.write_retired_total;
+            rw_cmd_delta += current.rw_cmd_total - previous.rw_cmd_total;
+            act_cmd_delta += current.act_cmd_total - previous.act_cmd_total;
+            timeout_read = timeout_read || current.timeout_read_total != previous.timeout_read_total;
+            timeout_write = timeout_write || current.timeout_write_total != previous.timeout_write_total;
+            previous = current;
         }
         unsigned channel_scale = NUM_CHANS;
         unsigned total_cnt = read_cnt + write_cnt;
-        if ((rw_sync_group == READ_GROUP && schedulable_read_cnt != 0) ||
-                (rw_sync_group == WRITE_GROUP && schedulable_write_cnt != 0)) {
-            rw_sync_serial_cmd_cnt++;
+        uint8_t applied_group = rw_sync_group_state.front();
+        uint8_t target_group = rw_sync_group_state.back();
+        if (applied_group == READ_GROUP) {
+            rw_sync_serial_cmd_cnt += read_retired_delta;
+            rw_sync_reverse_cmd_cnt += write_retired_delta;
+        } else if (applied_group == WRITE_GROUP) {
+            rw_sync_serial_cmd_cnt += write_retired_delta;
+            rw_sync_reverse_cmd_cnt += read_retired_delta;
         }
-        if (!rw_sync_group_valid) {
-            rw_sync_group = NO_GROUP;
-            rw_sync_serial_cmd_cnt = 0;
-        } else if (rw_sync_group == NO_GROUP) {
+        rw_sync_rw_cmd_num += rw_cmd_delta;
+        rw_sync_act_cmd_num += act_cmd_delta;
+        bool stat_quc_rhit_high = HARDWARE_RHIT_EN &&
+                rw_sync_act_cmd_num <= RHIT_ACT_CMD_NUM * channel_scale;
+        bool high_qos_trig = RCMD_HQOS_W2R_SWITCH_EN &&
+                high_qos_read_cnt >= RCMD_HQOS_W2R_RLEVELH * channel_scale;
+        bool nonflat_r2w_pre;
+        bool nonflat_w2r_pre;
+        if (DMC_V580 || DMC_V590) {
+            nonflat_r2w_pre = stat_quc_rhit_high ? read_cnt < CMD_RLEVELL * channel_scale :
+                    write_cnt >= CMD_WLEVELH * channel_scale && read_cnt <= RLEVEL_R2W * channel_scale;
+            nonflat_w2r_pre = stat_quc_rhit_high ? read_cnt > CMD_RLEVELH * channel_scale :
+                    write_cnt <= CMD_WLEVELL * channel_scale ||
+                    (total_cnt <= ALEVEL_W2R * channel_scale && (IS_HBM2E || IS_HBM3));
+        } else {
+            nonflat_r2w_pre = write_cnt >= CMD_WLEVELH * channel_scale;
+            nonflat_w2r_pre = write_cnt <= CMD_WLEVELL * channel_scale;
+        }
+        bool pushed = false;
+        if (target_group == NO_GROUP) {
             if (total_cnt >= ENGRP_LEVEL * channel_scale) {
-                if (schedulable_write_cnt != 0 &&
-                        (write_cnt >= CMD_WLEVELH * channel_scale || schedulable_read_cnt == 0)) {
-                    rw_sync_group = WRITE_GROUP;
-                    rw_sync_serial_cmd_cnt = 0;
-                } else if (schedulable_read_cnt != 0) {
-                    rw_sync_group = READ_GROUP;
-                    rw_sync_serial_cmd_cnt = 0;
-                }
+                uint8_t next_group = write_cnt >= CMD_WLEVELH * channel_scale ||
+                        schedulable_read_cnt == 0 ? WRITE_GROUP : READ_GROUP;
+                rw_sync_group_state.push_back(next_group);
+                rw_sync_in_write_group = next_group == READ_GROUP;
+                pushed = true;
             }
-        } else if (total_cnt < EXGRP_LEVEL * channel_scale && availability <= RWGRP_AUTO_BW) {
-            rw_sync_group = NO_GROUP;
-            rw_sync_serial_cmd_cnt = 0;
-        } else if (rw_sync_group == READ_GROUP && schedulable_write_cnt != 0 &&
-                ((rw_sync_serial_cmd_cnt >= SERIAL_RLEVELL &&
-                  write_cnt >= CMD_WLEVELH * channel_scale && read_cnt <= RLEVEL_R2W * channel_scale) ||
-                 rw_sync_serial_cmd_cnt >= SERIAL_RLEVELH || schedulable_read_cnt == 0)) {
-            rw_sync_group = WRITE_GROUP;
-            rw_sync_serial_cmd_cnt = 0;
-        } else if (rw_sync_group == WRITE_GROUP && schedulable_read_cnt != 0 &&
-                ((rw_sync_serial_cmd_cnt >= SERIAL_WLEVELL && write_cnt <= CMD_WLEVELL * channel_scale) ||
-                 rw_sync_serial_cmd_cnt >= SERIAL_WLEVELH || schedulable_write_cnt == 0)) {
-            rw_sync_group = READ_GROUP;
-            rw_sync_serial_cmd_cnt = 0;
+        } else if (target_group == READ_GROUP) {
+            if (total_cnt < EXGRP_LEVEL * channel_scale && availability <= RWGRP_AUTO_BW) {
+                rw_sync_group_state.push_back(NO_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                pushed = true;
+            } else if (timeout_write) {
+                rw_sync_group_state.push_back(WRITE_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                rw_sync_in_write_group = true;
+                pushed = true;
+            } else if (((rw_sync_serial_cmd_cnt >= SERIAL_RLEVELL * channel_scale && nonflat_r2w_pre) ||
+                    rw_sync_serial_cmd_cnt >= SERIAL_RLEVELH * channel_scale || schedulable_read_cnt == 0) &&
+                    schedulable_write_cnt != 0 && !high_qos_trig) {
+                rw_sync_group_state.push_back(WRITE_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                rw_sync_in_write_group = false;
+                pushed = true;
+            } else if (rw_sync_in_write_group &&
+                    rw_sync_reverse_cmd_cnt >= RW_GRPCHG_W2R_TH * channel_scale && !high_qos_trig) {
+                rw_sync_in_write_group = false;
+                rw_sync_reverse_cmd_cnt = 0;
+            }
+        } else if (target_group == WRITE_GROUP) {
+            if (total_cnt < EXGRP_LEVEL * channel_scale && availability <= RWGRP_AUTO_BW) {
+                rw_sync_group_state.push_back(NO_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                pushed = true;
+            } else if (timeout_read || high_qos_trig && schedulable_read_cnt != 0) {
+                rw_sync_group_state.push_back(READ_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                rw_sync_in_write_group = timeout_read ? false : true;
+                pushed = true;
+            } else if (((rw_sync_serial_cmd_cnt >= SERIAL_WLEVELL * channel_scale && nonflat_w2r_pre) ||
+                    rw_sync_serial_cmd_cnt >= SERIAL_WLEVELH * channel_scale || schedulable_write_cnt == 0) &&
+                    schedulable_read_cnt != 0) {
+                rw_sync_group_state.push_back(READ_GROUP);
+                rw_sync_serial_cmd_cnt = 0;
+                rw_sync_reverse_cmd_cnt = 0;
+                rw_sync_in_write_group = true;
+                pushed = true;
+            } else if (!rw_sync_in_write_group &&
+                    rw_sync_reverse_cmd_cnt >= RW_GRPCHG_R2W_TH * channel_scale) {
+                rw_sync_in_write_group = true;
+                rw_sync_reverse_cmd_cnt = 0;
+            }
+        } else {
+            assert(0);
         }
+        if (!pushed) rw_sync_group_state.push_back(target_group);
+        rw_sync_group_state.erase(rw_sync_group_state.begin());
+        if (rw_sync_rw_cmd_num >= RHIT_RW_CMD_NUM * channel_scale) {
+            rw_sync_rw_cmd_num = 0;
+            rw_sync_act_cmd_num = 0;
+        }
+        rw_sync_group = rw_sync_group_state.front();
     } else {
         ERROR("Invalid DMC_RW_SYNC_MODE: "<<DMC_RW_SYNC_MODE);
         assert(0);
