@@ -667,6 +667,12 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     for (size_t i = 0; i < 8; i ++) rw_group_state.push_back(NO_GROUP);
     rw_schedulable_read_cnt = 0;
     rw_schedulable_write_cnt = 0;
+    rw_group_read_retired_total = 0;
+    rw_group_write_retired_total = 0;
+    rw_group_rw_cmd_total = 0;
+    rw_group_act_cmd_total = 0;
+    rw_group_timeout_read_total = 0;
+    rw_group_timeout_write_total = 0;
     rw_sync_group_valid = false;
     rw_sync_group = NO_GROUP;
     in_write_group = false; // true is write group, false is read group
@@ -5218,11 +5224,11 @@ unsigned MemoryController::priority(Cmd *cmd) {
 unsigned MemoryController::priority_pri(Cmd *cmd) {
     unsigned level_ret = cmd->pri;
     if (RCMD_BANK_ARB_EN && cmd->cmd_type >= READ_CMD && cmd->cmd_type <= READ_P_CMD) {
-        if (cmd->bankIndex % NUM_BANKS == max_rcmd_bank[cmd->rank] && rw_group_state[0] != NO_GROUP) {
+        if (cmd->bankIndex % NUM_BANKS == max_rcmd_bank[cmd->rank] && GetEffectiveRwGroup() != NO_GROUP) {
             if (cmd->pri > RCMD_BANK_ARB_PRI) level_ret = RCMD_BANK_ARB_PRI;
         }
     } else if (WCMD_BANK_ARB_EN && cmd->cmd_type >= WRITE_CMD && cmd->cmd_type <= WRITE_MASK_P_CMD) {
-        if (cmd->bankIndex % NUM_BANKS == max_wcmd_bank[cmd->rank] && rw_group_state[0] != NO_GROUP) {
+        if (cmd->bankIndex % NUM_BANKS == max_wcmd_bank[cmd->rank] && GetEffectiveRwGroup() != NO_GROUP) {
             if (cmd->pri > WCMD_BANK_ARB_PRI) level_ret = WCMD_BANK_ARB_PRI;
         }
     }
@@ -5235,7 +5241,7 @@ descriptor: main scheduler,The purpose of this function is selecting the best ta
 void MemoryController::scheduler() {
     if (CmdQueue.empty()) return;
 
-    if (RCMD_BANK_ARB_EN && rw_group_state[0] != NO_GROUP) {
+    if (RCMD_BANK_ARB_EN && GetEffectiveRwGroup() != NO_GROUP) {
         for (unsigned i = 0; i < NUM_RANKS; i ++) {
             unsigned max_cnt = 0;
             for (unsigned j = 0; j < NUM_BANKS; j ++) {
@@ -5249,7 +5255,7 @@ void MemoryController::scheduler() {
         }
     }
 
-    if (WCMD_BANK_ARB_EN && rw_group_state[0] != NO_GROUP) {
+    if (WCMD_BANK_ARB_EN && GetEffectiveRwGroup() != NO_GROUP) {
         for (unsigned i = 0; i < NUM_RANKS; i ++) {
             unsigned max_cnt = 0;
             for (unsigned j = 0; j < NUM_BANKS; j ++) {
@@ -5359,6 +5365,8 @@ void MemoryController::scheduler() {
             sch_tout_cmd = true;
             sch_tout_type = c->type;
             sch_tout_rank = c->rank;
+            if (c->type == DATA_READ) rw_group_timeout_read_total++;
+            else rw_group_timeout_write_total++;
         }
         if (PreCmd.trans_type != c->type) {
             rw_switch_cnt ++;
@@ -5881,6 +5889,7 @@ void MemoryController::scheduler() {
             bankStates[c->bankIndex].state->pageOpenTime = now();
             act_executing[c->bankIndex] = false;
             act_cmd_num ++;
+            rw_group_act_cmd_total++;
             for (auto &trans : transactionQueue) {
                 if (trans->task != c->task) continue;
                 if (trans->transactionType != DATA_READ) trans->trcd_met = now() + tRCD_WR;
@@ -7096,8 +7105,6 @@ void MemoryController::update_rwgroup_state() {
         }
     }
 
-    if (rw_sync_group_valid) goto rw_group_update_done;
-
     switch (group_state.back()) {
         case NO_GROUP: {
             if (GetDmcQsize() >= ENGRP_LEVEL) {
@@ -7224,7 +7231,6 @@ void MemoryController::update_rwgroup_state() {
         }
     }
 
-rw_group_update_done:
     if (rw_cmd_num >= RHIT_RW_CMD_NUM) {
         rw_cmd_num = 0;
         act_cmd_num = 0;
@@ -7239,17 +7245,29 @@ rw_group_update_done:
 }
 
 uint8_t MemoryController::GetEffectiveRwGroup() const {
-    return rw_group_state[0];
+    return rw_sync_group_valid ? rw_sync_group : rw_group_state[0];
+}
+
+MemoryController::RwGroupSnapshot MemoryController::GetRwGroupSnapshot() const {
+    RwGroupSnapshot snapshot;
+    snapshot.read_cnt = que_read_cnt;
+    snapshot.write_cnt = que_write_cnt;
+    snapshot.schedulable_read_cnt = rw_schedulable_read_cnt;
+    snapshot.schedulable_write_cnt = rw_schedulable_write_cnt;
+    snapshot.availability = availability;
+    snapshot.high_qos_read_cnt = accumulate(que_read_highqos_cnt.begin(), que_read_highqos_cnt.end(), 0);
+    snapshot.read_retired_total = rw_group_read_retired_total;
+    snapshot.write_retired_total = rw_group_write_retired_total;
+    snapshot.rw_cmd_total = rw_group_rw_cmd_total;
+    snapshot.act_cmd_total = rw_group_act_cmd_total;
+    snapshot.timeout_read_total = rw_group_timeout_read_total;
+    snapshot.timeout_write_total = rw_group_timeout_write_total;
+    return snapshot;
 }
 
 void MemoryController::SetRwSyncGroup(uint8_t group) {
     rw_sync_group_valid = true;
     rw_sync_group = group;
-    if (group != rw_group_state.back()) {
-        rw_group_state.push_back(group);
-        serial_cmd_cnt = 0;
-        rwgrp_ch_cmd_cnt = 0;
-    }
 }
 
 void MemoryController::ClearRwSyncGroup() {
@@ -7306,6 +7324,7 @@ void MemoryController::update_que() {
             if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) serial_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) rwgrp_ch_cmd_cnt ++;
+                rw_group_read_retired_total++;
             }
             //remove conflict
             for (size_t j = i + 1; j < len; j++) {
@@ -7334,6 +7353,7 @@ void MemoryController::update_que() {
             if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) rwgrp_ch_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) serial_cmd_cnt ++;
+                rw_group_write_retired_total++;
             }
             w_bank_cnt[t->bankIndex] --;
             w_bg_cnt[t->rank][t->group] --;
@@ -7392,6 +7412,7 @@ void MemoryController::update_que() {
         transactionQueue.erase(transactionQueue.begin() + i);
         dmc_cmd_cnt ++;
         rw_cmd_num ++;
+        rw_group_rw_cmd_total++;
         if (GRP_RANK_EN && !t->timeout && rk_grp_state != NO_RGRP) {
             if (rk_grp_state == real_rk_grp_state) {
                 serial_cmd_cnt ++;
@@ -7481,11 +7502,11 @@ void MemoryController::que_pipeline() {
         //if (refreshPerBank[t->bankIndex].refreshing) continue;
         if (bankStates[t->bankIndex].state->currentBankState == RowActive &&
                 t->row == bankStates[t->bankIndex].state->openRowAddress) {
-            if ((rw_group_state[0] == READ_GROUP && t->transactionType == DATA_READ) || (rk_grp_state == t_state)
-                    || (rw_group_state[0] == WRITE_GROUP && t->transactionType == DATA_WRITE)) {
+            if ((GetEffectiveRwGroup() == READ_GROUP && t->transactionType == DATA_READ) || (rk_grp_state == t_state)
+                    || (GetEffectiveRwGroup() == WRITE_GROUP && t->transactionType == DATA_WRITE)) {
                 bankStates[t->bankIndex].has_cmd_rowhit = true;
             }
-            if (rw_group_state[0] == READ_GROUP && t->qos <= SWITCH_HQOS_LEVEL && t->transactionType == DATA_READ) {
+            if (GetEffectiveRwGroup() == READ_GROUP && t->qos <= SWITCH_HQOS_LEVEL && t->transactionType == DATA_READ) {
                 bankStates[t->bankIndex].has_highqos_cmd_rowhit = RHIT_HQOS_BREAK_EN;
             }
         }
@@ -7512,7 +7533,7 @@ void MemoryController::que_pipeline() {
         }
 
         if ((RHIT_BREAK_EN && bankStates[trans->bankIndex].ser_rhit_cnt >= RHIT_BREAK_LEVEL) ||
-                (RHIT_HQOS_BREAK_EN && rw_group_state[0] == READ_GROUP &&
+                (RHIT_HQOS_BREAK_EN && GetEffectiveRwGroup() == READ_GROUP &&
                  highqos_r_bank_cnt[trans->bankIndex] >= RHIT_HQOS_BREAK_OTH_RCMD_LEVEL)) {
             if (bankStates[trans->bankIndex].state->currentBankState == RowActive &&
                     trans->row == bankStates[trans->bankIndex].state->openRowAddress &&
@@ -7535,14 +7556,14 @@ void MemoryController::que_pipeline() {
             if (trans->row != bankStates[bank].state->openRowAddress) continue;
             if (bankStates[bank].has_rhit_break) continue;
             if (trans->transactionType == DATA_READ && rcmd_bp_byrp && bank == trans->bankIndex) break;
-            if ((rw_group_state[0] == NO_GROUP && !GRP_RANK_EN) || (rk_grp_state == NO_RGRP && !GRP_RW_EN)) {
+            if ((GetEffectiveRwGroup() == NO_GROUP && !GRP_RANK_EN) || (rk_grp_state == NO_RGRP && !GRP_RW_EN)) {
                 bankStates[bank].hold_precharge = true;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- HPRE :: NO_GROUP, task="
                             <<trans->task<<", bank="<<trans->bankIndex<<endl);
                 }
                 break;
-            } else if (rw_group_state[0] == READ_GROUP && trans->transactionType == DATA_READ &&
+            } else if (GetEffectiveRwGroup() == READ_GROUP && trans->transactionType == DATA_READ &&
                     bankStates[bank].state->lastCmdType == DATA_READ) {
                 bankStates[bank].hold_precharge = true;
                 if (DEBUG_BUS) {
@@ -7550,7 +7571,7 @@ void MemoryController::que_pipeline() {
                             <<trans->task<<", bank="<<trans->bankIndex<<endl);
                 }
                 break;
-            } else if (rw_group_state[0] == WRITE_GROUP && trans->transactionType != DATA_READ &&
+            } else if (GetEffectiveRwGroup() == WRITE_GROUP && trans->transactionType != DATA_READ &&
                     bankStates[bank].state->lastCmdType != DATA_READ) {
                 bankStates[bank].hold_precharge = true;
                 if (DEBUG_BUS) {
@@ -7587,7 +7608,7 @@ void MemoryController::que_pipeline() {
                 }
             }
         }
-        if (DMC_V580 && GRP_RW_EN && rw_group_state[0] == NO_GROUP &&
+        if (DMC_V580 && GRP_RW_EN && GetEffectiveRwGroup() == NO_GROUP &&
                 (PreCmd.type == READ_CMD || PreCmd.type == READ_P_CMD)) {
             for (auto &trans : transactionQueue) {
                 if (trans->addrconf) continue;
