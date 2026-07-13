@@ -116,7 +116,7 @@ class Rmw:public SimulatorObject {
     unsigned preWriteMergeUnpairedToRmw;
     unsigned preWriteMergeUnpairedDirect;
     unsigned preWriteMergeBufferFull;
-    
+
     vector<uint32_t> rmw_que_cnt;
     
     uint64_t start_cycle;
@@ -165,10 +165,23 @@ class Rmw:public SimulatorObject {
         WriteMergeDataRemap(uint64_t src_task_, uint64_t dst_task_, unsigned remaining_beats_);
     };
 
+    struct BypassedMergedWrite {
+        uint64_t first_task;
+        uint64_t merged_task;
+        unsigned first_remaining;
+        unsigned second_remaining;
+        bool dispatched;
+        BypassedMergedWrite(uint64_t first_task_, uint64_t merged_task_, unsigned first_remaining_, unsigned second_remaining_)
+                : first_task(first_task_), merged_task(merged_task_), first_remaining(first_remaining_),
+                  second_remaining(second_remaining_), dispatched(false) {}
+    };
+
     std::vector<WriteMergeEntry> write_merge_buffer;
     std::vector<PendingWriteMergeResp> pending_write_merge_resps;
     std::vector<WriteMergeDataRemap> write_merge_data_remaps;
     std::map<uint64_t, unsigned> pending_write_data_cnt;
+    std::map<uint64_t, unsigned> fast_bypass_write_data_cnt;
+    std::map<uint64_t, BypassedMergedWrite> bypassed_merged_writes;
     uint64_t pre_write_merge_resp_time;
 
     bool is_write_merge_candidate(const Transaction *trans) const;
