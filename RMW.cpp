@@ -716,6 +716,12 @@ bool Rmw::addTransaction(Transaction * trans) {
         return true;
     } else {
         cmd_set_conflict(trans);
+        auto pending = pending_write_data_cnt.find(trans->task);
+        if (pending != pending_write_data_cnt.end()) {
+            unsigned beats = trans->burst_length + 1;
+            trans->data_ready_cnt += std::min(pending->second, beats - trans->data_ready_cnt);
+            pending_write_data_cnt.erase(pending);
+        }
         if (RMW_CONF_SIZE == 32) {
             trans->arb_time = now() + 3;
         } else {
