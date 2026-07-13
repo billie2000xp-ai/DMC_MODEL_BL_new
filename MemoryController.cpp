@@ -675,6 +675,8 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     rw_group_timeout_write_total = 0;
     rw_sync_group_valid = false;
     rw_sync_group = NO_GROUP;
+    rw_sync_in_write_group = false;
+    rw_sync_ch_cmd_cnt = 0;
     in_write_group = false; // true is write group, false is read group
     rk_grp_state = NO_RGRP;
     real_rk_grp_state = NO_RGRP;
@@ -5490,18 +5492,29 @@ void MemoryController::scheduler() {
     }
 
     if (GRP_RW_EN) {
-        uint8_t effective_rw_group = GetEffectiveRwGroup();
-        if (effective_rw_group == READ_GROUP && in_write_group && !c->timeout &&
+        uint8_t local_rw_group = rw_group_state[0];
+        if (local_rw_group == READ_GROUP && in_write_group && !c->timeout &&
                 (c->cmd_type == READ_CMD || c->cmd_type == READ_P_CMD)) {
             in_write_group = false;
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- GRP_REAL :: Real Change to READ_GROUP"<<endl);
             }
-        } else if (effective_rw_group == WRITE_GROUP && !in_write_group && !c->timeout
+        } else if (local_rw_group == WRITE_GROUP && !in_write_group && !c->timeout
                 && (c->cmd_type >= WRITE_CMD && c->cmd_type <= WRITE_MASK_P_CMD)) {
             in_write_group = true;
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- GRP_REAL :: Real Change to WRITE_GROUP"<<endl);
+            }
+        }
+        if (rw_sync_group_valid) {
+            if (rw_sync_group == READ_GROUP && rw_sync_in_write_group && !c->timeout &&
+                    (c->cmd_type == READ_CMD || c->cmd_type == READ_P_CMD)) {
+                rw_sync_in_write_group = false;
+                rw_sync_ch_cmd_cnt = 0;
+            } else if (rw_sync_group == WRITE_GROUP && !rw_sync_in_write_group && !c->timeout &&
+                    (c->cmd_type >= WRITE_CMD && c->cmd_type <= WRITE_MASK_P_CMD)) {
+                rw_sync_in_write_group = true;
+                rw_sync_ch_cmd_cnt = 0;
             }
         }
     }
@@ -6655,6 +6668,8 @@ void MemoryController::update() {
 
     update_grt_fifo();
 
+    update_rw_schedulable_counts();
+
     for (size_t i = 0; i < CORE_CONCURR; i ++) {
         if (now() % CORE_CONCURR_PRD != 0 && i == 1) break;
         core_concurr_en = (i == 0);
@@ -7068,13 +7083,7 @@ void MemoryController::rank_group_weight(unsigned * rank, unsigned * type) {
     }
 }
 
-void MemoryController::update_rwgroup_state() {
-    if (GRP_RANK_EN || (!GRP_RW_EN)) return;
-
-    vector<uint8_t> &group_state = rw_group_state;
-
-    bool has_read_cmd = false;
-    bool has_write_cmd = false;
+void MemoryController::update_rw_schedulable_counts() {
     rw_schedulable_read_cnt = 0;
     rw_schedulable_write_cnt = 0;
     for (auto &trans : transactionQueue) {
@@ -7086,13 +7095,21 @@ void MemoryController::update_rwgroup_state() {
         //if (refreshPerBank[trans->bankIndex].refreshing) continue;
         if (trans->bp_by_tout) continue;
         if (trans->transactionType == DATA_READ) {
-            has_read_cmd = true;
             rw_schedulable_read_cnt++;
         } else if (trans->data_ready_cnt == (trans->burst_length + 1)) {
-            has_write_cmd = true;
             rw_schedulable_write_cnt++;
         }
     }
+}
+
+void MemoryController::update_rwgroup_state() {
+    if (GRP_RANK_EN || (!GRP_RW_EN)) return;
+
+    vector<uint8_t> &group_state = rw_group_state;
+
+    update_rw_schedulable_counts();
+    bool has_read_cmd = rw_schedulable_read_cnt != 0;
+    bool has_write_cmd = rw_schedulable_write_cnt != 0;
 
     bool nonflat_r2w_pre, nonflat_w2r_pre;
     bool stat_quc_rhit_high = HARDWARE_RHIT_EN && act_cmd_num <= RHIT_ACT_CMD_NUM;
@@ -7266,6 +7283,9 @@ MemoryController::RwGroupSnapshot MemoryController::GetRwGroupSnapshot() const {
 }
 
 void MemoryController::SetRwSyncGroup(uint8_t group) {
+    if (!rw_sync_group_valid || rw_sync_group != group) {
+        rw_sync_ch_cmd_cnt = 0;
+    }
     rw_sync_group_valid = true;
     rw_sync_group = group;
 }
@@ -7324,6 +7344,7 @@ void MemoryController::update_que() {
             if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) serial_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) rwgrp_ch_cmd_cnt ++;
+                if (rw_sync_group_valid && rw_sync_group == WRITE_GROUP) rw_sync_ch_cmd_cnt++;
                 rw_group_read_retired_total++;
             }
             //remove conflict
@@ -7353,6 +7374,7 @@ void MemoryController::update_que() {
             if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) rwgrp_ch_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) serial_cmd_cnt ++;
+                if (rw_sync_group_valid && rw_sync_group == READ_GROUP) rw_sync_ch_cmd_cnt++;
                 rw_group_write_retired_total++;
             }
             w_bank_cnt[t->bankIndex] --;
@@ -9095,10 +9117,12 @@ void MemoryController::lc(Transaction *t) {
     }
 
     uint8_t effective_rw_group = GetEffectiveRwGroup();
+    bool effective_in_write_group = rw_sync_group_valid ? rw_sync_in_write_group : in_write_group;
+    uint8_t effective_ch_cmd_cnt = rw_sync_group_valid ? rw_sync_ch_cmd_cnt : rwgrp_ch_cmd_cnt;
     if (effective_rw_group != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
         if (effective_rw_group == READ_GROUP && rw_schedulable_read_cnt != 0 && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))) {
-            if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !in_write_group) {
+            if (t->nextCmd == activate_cmd || effective_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !effective_in_write_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: Read group backpress a write command. task="
                             <<t->task<<", nextCmd="<<t->nextCmd<<endl);
@@ -9115,7 +9139,7 @@ void MemoryController::lc(Transaction *t) {
                 return;
             }
         } else if (effective_rw_group == WRITE_GROUP && rw_schedulable_write_cnt != 0 && t->transactionType == DATA_READ && (!LQOS_BP_EN || (lqos_wr_bp && LQOS_BP_EN))) {
-            if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_R2W_TH || in_write_group) {
+            if (t->nextCmd == activate_cmd || effective_ch_cmd_cnt >= RW_GRPCHG_R2W_TH || effective_in_write_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: Write group backpress a read command. task="
                             <<t->task<<", nextCmd="<<t->nextCmd<<endl);
