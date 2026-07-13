@@ -170,9 +170,6 @@ public:
     void faw_update();
     void page_timeout_policy();
     void update_rwgroup_state();
-    void pre_evaluate_rw_sync();
-    uint8_t predict_rw_sync_group();
-    void apply_rw_sync_group(uint8_t group, bool allow_local_fallback = false);
     unsigned GetDmcAvailability() const;
     unsigned GetDmcWriteAvailability() const;
     void update_group_state();
@@ -194,12 +191,12 @@ public:
             return ((DmcLog2(length, JEDEC_DATA_BUS_BITS)) / DMC_DATA_BUS_BITS);}
     unsigned Read_Cnt() {return que_read_cnt;};
     unsigned Write_Cnt() {return que_write_cnt;};
-    unsigned GetRwSyncReadCnt() const;
-    unsigned GetRwSyncWriteCnt() const;
-    unsigned GetRwSyncReadBubble() const;
-    unsigned GetRwSyncWriteBubble() const;
-    bool GetRwSyncSwitchReadFlag() const;
-    bool GetRwSyncSwitchWriteFlag() const;
+    unsigned SchedulableReadCnt() const {return rw_schedulable_read_cnt;};
+    unsigned SchedulableWriteCnt() const {return rw_schedulable_write_cnt;};
+    uint8_t GetLocalRwGroup() const {return rw_group_state[0];};
+    uint8_t GetEffectiveRwGroup() const;
+    void SetRwSyncGroup(uint8_t group);
+    void ClearRwSyncGroup();
     bool HasPendingWork() const;
     void PostCalcTiming();
     void calc_occ();
@@ -421,6 +418,10 @@ public:
     unsigned phy_lp_cnt;
     unsigned phy_notlp_cnt;
     vector <uint8_t> rw_group_state;
+    unsigned rw_schedulable_read_cnt;
+    unsigned rw_schedulable_write_cnt;
+    bool rw_sync_group_valid;
+    uint8_t rw_sync_group;
     bool in_write_group;
     uint8_t rk_grp_state;
     uint8_t real_rk_grp_state;
@@ -581,15 +582,6 @@ public:
     vector <uint64_t> pbr_hold_pre_time;
     unsigned rw_exec_cnt;
     unsigned table_use_cnt;
-    unsigned rw_sync_read_cnt;
-    unsigned rw_sync_write_cnt;
-    unsigned rw_sync_read_bubble_cnt;
-    unsigned rw_sync_write_bubble_cnt;
-    bool rw_sync_switch_read_flag;
-    bool rw_sync_switch_write_flag;
-    bool rw_sync_read_issued;
-    bool rw_sync_write_issued;
-
     vector<bool> rank_cmd_high_qos;
     vector<unsigned> rank_rhit_num;
     unsigned com_highqos_read_cnt;
