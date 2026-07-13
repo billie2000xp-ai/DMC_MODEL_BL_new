@@ -98,9 +98,13 @@ public:
 private:
     bool rw_sync_group_valid;
     uint8_t rw_sync_group;
+    vector<uint8_t> rw_sync_group_state;
+    bool rw_sync_in_write_group;
     unsigned rw_sync_serial_cmd_cnt;
-    uint64_t rw_sync_prev_reads;
-    uint64_t rw_sync_prev_writes;
+    unsigned rw_sync_reverse_cmd_cnt;
+    unsigned rw_sync_rw_cmd_num;
+    unsigned rw_sync_act_cmd_num;
+    vector<MemoryController::RwGroupSnapshot> rw_sync_prev_snapshot;
     void update_rw_sync_group();
     class DmcCallbackProxy {
     public:
