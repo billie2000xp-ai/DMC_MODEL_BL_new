@@ -665,15 +665,11 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     avai_sqrt = 0;
     rw_group_state.reserve(8);
     for (size_t i = 0; i < 8; i ++) rw_group_state.push_back(NO_GROUP);
+    rw_schedulable_read_cnt = 0;
+    rw_schedulable_write_cnt = 0;
+    rw_sync_group_valid = false;
+    rw_sync_group = NO_GROUP;
     in_write_group = false; // true is write group, false is read group
-    rw_sync_read_cnt = 0;
-    rw_sync_write_cnt = 0;
-    rw_sync_read_bubble_cnt = 0;
-    rw_sync_write_bubble_cnt = 0;
-    rw_sync_switch_read_flag = false;
-    rw_sync_switch_write_flag = false;
-    rw_sync_read_issued = false;
-    rw_sync_write_issued = false;
     rk_grp_state = NO_RGRP;
     real_rk_grp_state = NO_RGRP;
     mrd_wr_availability = 0;
@@ -2582,7 +2578,7 @@ void MemoryController::update_wdata() {
 
         // 32B 数据的 2 拍消化打拍逻辑
         if (!wdata_half_beat_done) {
-            wdata_half_beat_done = true;  
+            wdata_half_beat_done = true;
             if (DEBUG_BUS) {
                  PRINTN(setw(10)<<now()<<" -- MATCH :: eating first 16B of 32B, task="<<t->task<<endl);
             }
@@ -3208,7 +3204,7 @@ void MemoryController::exec() {
                 assert(0);
             }
 
-            if (PRINT_EXEC) {
+            if (DEBUG_BUS && PRINT_EXEC) {
                 static uint64_t pre_time_exec = 0;
                 if (command.type == READ_CMD) {
                     DEBUGN(setw(10)<<now()<<" -- EXEC :: send [READ_CMD] to DFI task="<<command.task<<" rank="
@@ -5359,10 +5355,6 @@ void MemoryController::scheduler() {
         no_sch_cmd_en = true;
         no_sch_cmd_cnt = 0x0;
         page_rw_cnt ++;
-        if (DMC_RW_SYNC_EN) {
-            if (c->type == DATA_READ) rw_sync_read_issued = true;
-            else rw_sync_write_issued = true;
-        }
         if (RWGRP_TRANS_BY_TOUT && c->timeout) {
             sch_tout_cmd = true;
             sch_tout_type = c->type;
@@ -5490,13 +5482,14 @@ void MemoryController::scheduler() {
     }
 
     if (GRP_RW_EN) {
-        if (rw_group_state[0] == READ_GROUP && in_write_group && !c->timeout &&
+        uint8_t effective_rw_group = GetEffectiveRwGroup();
+        if (effective_rw_group == READ_GROUP && in_write_group && !c->timeout &&
                 (c->cmd_type == READ_CMD || c->cmd_type == READ_P_CMD)) {
             in_write_group = false;
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- GRP_REAL :: Real Change to READ_GROUP"<<endl);
             }
-        } else if (rw_group_state[0] == WRITE_GROUP && !in_write_group && !c->timeout
+        } else if (effective_rw_group == WRITE_GROUP && !in_write_group && !c->timeout
                 && (c->cmd_type >= WRITE_CMD && c->cmd_type <= WRITE_MASK_P_CMD)) {
             in_write_group = true;
             if (DEBUG_BUS) {
@@ -7067,11 +7060,14 @@ void MemoryController::rank_group_weight(unsigned * rank, unsigned * type) {
 }
 
 void MemoryController::update_rwgroup_state() {
-    if (DMC_RW_SYNC_EN) return;
-    if (GRP_RANK_EN || !GRP_RW_EN) return;
+    if (GRP_RANK_EN || (!GRP_RW_EN)) return;
+
+    vector<uint8_t> &group_state = rw_group_state;
 
     bool has_read_cmd = false;
     bool has_write_cmd = false;
+    rw_schedulable_read_cnt = 0;
+    rw_schedulable_write_cnt = 0;
     for (auto &trans : transactionQueue) {
         unsigned sub_channel = (trans->bankIndex % NUM_BANKS) / sc_bank_num;
         if (trans->addrconf) continue;
@@ -7080,8 +7076,13 @@ void MemoryController::update_rwgroup_state() {
         if (refreshALL[trans->rank][sub_channel].refreshing) continue;
         //if (refreshPerBank[trans->bankIndex].refreshing) continue;
         if (trans->bp_by_tout) continue;
-        if (trans->transactionType == DATA_READ) has_read_cmd = true;
-        else if (trans->data_ready_cnt == (trans->burst_length + 1)) has_write_cmd = true;
+        if (trans->transactionType == DATA_READ) {
+            has_read_cmd = true;
+            rw_schedulable_read_cnt++;
+        } else if (trans->data_ready_cnt == (trans->burst_length + 1)) {
+            has_write_cmd = true;
+            rw_schedulable_write_cnt++;
+        }
     }
 
     bool nonflat_r2w_pre, nonflat_w2r_pre;
@@ -7095,18 +7096,20 @@ void MemoryController::update_rwgroup_state() {
         }
     }
 
-    switch (rw_group_state.back()) {
+    if (rw_sync_group_valid) goto rw_group_update_done;
+
+    switch (group_state.back()) {
         case NO_GROUP: {
             if (GetDmcQsize() >= ENGRP_LEVEL) {
                 if (que_write_cnt >= CMD_WLEVELH || !has_read_cmd) {
-                    rw_group_state.push_back(WRITE_GROUP);
+                    group_state.push_back(WRITE_GROUP);
                     if (DEBUG_BUS) {
                         PRINTN(setw(10)<<now()<<" -- GRP_CHG :: NG to WG, Qsize="<<GetDmcQsize()
                                 <<", =que_write_cnt"<<+que_write_cnt<<", has_read_cmd="<<has_read_cmd<<endl);
                     }
                     in_write_group = false;
                 } else {
-                    rw_group_state.push_back(READ_GROUP);
+                    group_state.push_back(READ_GROUP);
                     if (DEBUG_BUS) {
                         PRINTN(setw(10)<<now()<<" -- GRP_CHG :: NG to RG, Qsize="<<GetDmcQsize()
                                 <<", que_write_cnt="<<+que_write_cnt<<", has_read_cmd="<<has_read_cmd<<endl);
@@ -7124,14 +7127,14 @@ void MemoryController::update_rwgroup_state() {
                 nonflat_r2w_pre = que_write_cnt >= CMD_WLEVELH;
             }
             if (GetDmcQsize() < EXGRP_LEVEL && availability <= RWGRP_AUTO_BW) {
-                rw_group_state.push_back(NO_GROUP);
+                group_state.push_back(NO_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: RG to NG, Qsize="<<GetDmcQsize()<<endl);
                 }
                 serial_cmd_cnt = 0x0;
                 rwgrp_ch_cmd_cnt = 0x0;
             } else if (sch_tout_cmd && sch_tout_type != DATA_READ) { // Not used now
-                rw_group_state.push_back(WRITE_GROUP);
+                group_state.push_back(WRITE_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: RG to WG by timeout command,"
                             <<" serial_cmd_cnt="<<+serial_cmd_cnt<<", que_read_cnt="<<+que_read_cnt
@@ -7142,7 +7145,7 @@ void MemoryController::update_rwgroup_state() {
                 in_write_group = true;
             } else if (((serial_cmd_cnt >= SERIAL_RLEVELL && nonflat_r2w_pre) ||
                     serial_cmd_cnt >= SERIAL_RLEVELH || !has_read_cmd) && has_write_cmd && !high_qos_trig) {
-                rw_group_state.push_back(WRITE_GROUP);
+                group_state.push_back(WRITE_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: RG to WG, serial_cmd_cnt="
                             <<+serial_cmd_cnt<<", que_read_cnt="<<+que_read_cnt<<", que_write_cnt="
@@ -7169,14 +7172,14 @@ void MemoryController::update_rwgroup_state() {
                 nonflat_w2r_pre = que_write_cnt <= CMD_WLEVELL;
             }
             if (GetDmcQsize() < EXGRP_LEVEL && availability <= RWGRP_AUTO_BW) {
-                rw_group_state.push_back(NO_GROUP);
+                group_state.push_back(NO_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: WG to NG, Qsize="<<GetDmcQsize()<<endl);
                 }
                 serial_cmd_cnt = 0x0;
                 rwgrp_ch_cmd_cnt = 0x0;
             } else if (sch_tout_cmd && sch_tout_type == DATA_READ) { // Not used now
-                rw_group_state.push_back(READ_GROUP);
+                group_state.push_back(READ_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: WG to RG by timeout command,"
                             <<" serial_cmd_cnt="<<+serial_cmd_cnt<<", que_read_cnt="<<+que_read_cnt
@@ -7186,7 +7189,7 @@ void MemoryController::update_rwgroup_state() {
                 rwgrp_ch_cmd_cnt = 0x0;
                 in_write_group = false;
             } else if (high_qos_trig && has_read_cmd) {
-                rw_group_state.push_back(READ_GROUP);
+                group_state.push_back(READ_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: WG to RG, high qos trigger, high_qos_trig="<<high_qos_trig<<endl);
                 }
@@ -7196,7 +7199,7 @@ void MemoryController::update_rwgroup_state() {
                 if (high_qos_trig) highqos_trig_grpsw_cnt ++;
             } else if (((serial_cmd_cnt >= SERIAL_WLEVELL && nonflat_w2r_pre) ||
                     serial_cmd_cnt >= SERIAL_WLEVELH || !has_write_cmd) && has_read_cmd) {
-                rw_group_state.push_back(READ_GROUP);
+                group_state.push_back(READ_GROUP);
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- GRP_CHG :: WG to RG, serial_cmd_cnt="
                             <<+serial_cmd_cnt<<", que_read_cnt="<<+que_read_cnt<<", que_write_cnt="
@@ -7216,179 +7219,41 @@ void MemoryController::update_rwgroup_state() {
             break;
         }
         default: {
-            ERROR(setw(10)<<now()<<" -- DMC["<<channel<<"] no such rw group type: "<<rw_group_state.back());
+            ERROR(setw(10)<<now()<<" -- DMC["<<channel<<"] no such rw group type: "<<group_state.back());
             assert(0);
         }
     }
 
+rw_group_update_done:
     if (rw_cmd_num >= RHIT_RW_CMD_NUM) {
         rw_cmd_num = 0;
         act_cmd_num = 0;
     }
-    if (rw_group_state.size() > 8) {
-        rw_group_state.erase(rw_group_state.begin());
+    if (group_state.size() > 8) {
+        group_state.erase(group_state.begin());
     } else {
-        rw_group_state.push_back(rw_group_state.back());
-        rw_group_state.erase(rw_group_state.begin());
+        group_state.push_back(group_state.back());
+        group_state.erase(group_state.begin());
     }
     sch_tout_cmd = false;
 }
 
-void MemoryController::pre_evaluate_rw_sync() {
-    rw_sync_read_cnt = 0;
-    rw_sync_write_cnt = 0;
-
-    for (auto &trans : transactionQueue) {
-        unsigned sub_channel = (trans->bankIndex % NUM_BANKS) / sc_bank_num;
-        if (trans->addrconf) continue;
-        if (trans->pre_act) continue;
-        if (now() < trans->enter_que_time) continue;
-        if (refreshALL[trans->rank][sub_channel].refreshing) continue;
-        if (trans->bp_by_tout) continue;
-        if (trans->transactionType == DATA_READ) {
-            rw_sync_read_cnt++;
-        } else if (trans->data_ready_cnt == (trans->burst_length + 1)) {
-            rw_sync_write_cnt++;
-        }
-    }
-
-    if (rw_group_state[0] == READ_GROUP && rw_sync_read_cnt != 0 && !rw_sync_read_issued) {
-        rw_sync_read_bubble_cnt++;
-    } else if (rw_group_state[0] != READ_GROUP || rw_sync_read_issued || rw_sync_read_cnt == 0) {
-        rw_sync_read_bubble_cnt = 0;
-    }
-
-    if (rw_group_state[0] == WRITE_GROUP && rw_sync_write_cnt != 0 && !rw_sync_write_issued) {
-        rw_sync_write_bubble_cnt++;
-    } else if (rw_group_state[0] != WRITE_GROUP || rw_sync_write_issued || rw_sync_write_cnt == 0) {
-        rw_sync_write_bubble_cnt = 0;
-    }
-
-    rw_sync_switch_write_flag = rw_group_state[0] == READ_GROUP && rw_sync_write_cnt >= icfg_mrd_wcmd_lvl2 && (rw_sync_read_bubble_cnt >= icfg_rdwr_chg_gap || rw_sync_read_cnt == 0);
-    rw_sync_switch_read_flag = rw_group_state[0] == WRITE_GROUP && rw_sync_read_cnt >= icfg_mrd_rcmd_lvl2 && (rw_sync_write_bubble_cnt >= icfg_rdwr_chg_gap || rw_sync_write_cnt == 0);
-    rw_sync_read_issued = false;
-    rw_sync_write_issued = false;
+uint8_t MemoryController::GetEffectiveRwGroup() const {
+    return rw_group_state[0];
 }
 
-uint8_t MemoryController::predict_rw_sync_group() {
-    bool has_read_cmd = rw_sync_read_cnt != 0;
-    bool has_write_cmd = rw_sync_write_cnt != 0;
-    uint8_t current_group = rw_group_state.back();
-    bool nonflat_r2w_pre, nonflat_w2r_pre;
-    bool stat_quc_rhit_high = HARDWARE_RHIT_EN && act_cmd_num <= RHIT_ACT_CMD_NUM;
-    bool high_qos_trig = RCMD_HQOS_W2R_SWITCH_EN &&
-            ((unsigned)accumulate(que_read_highqos_cnt.begin(), que_read_highqos_cnt.end(), 0) >= RCMD_HQOS_W2R_RLEVELH);
-
-    if (GRP_RANK_EN) return current_group;
-
-    switch (current_group) {
-        case NO_GROUP:
-            if (GetDmcQsize() >= ENGRP_LEVEL) {
-                return (que_write_cnt >= CMD_WLEVELH || !has_read_cmd) ? WRITE_GROUP : READ_GROUP;
-            }
-            return NO_GROUP;
-        case READ_GROUP:
-            if (DMC_V580 || DMC_V590) {
-                nonflat_r2w_pre = stat_quc_rhit_high ? (que_read_cnt < CMD_RLEVELL) :
-                        (que_write_cnt >= CMD_WLEVELH && que_read_cnt <= RLEVEL_R2W);
-            } else {
-                nonflat_r2w_pre = que_write_cnt >= CMD_WLEVELH;
-            }
-            if (GetDmcQsize() < EXGRP_LEVEL && availability <= RWGRP_AUTO_BW) return NO_GROUP;
-            if (sch_tout_cmd && sch_tout_type != DATA_READ) return WRITE_GROUP;
-            if (((serial_cmd_cnt >= SERIAL_RLEVELL && nonflat_r2w_pre) ||
-                    serial_cmd_cnt >= SERIAL_RLEVELH || !has_read_cmd) && has_write_cmd && !high_qos_trig) return WRITE_GROUP;
-            return READ_GROUP;
-        case WRITE_GROUP:
-            if (DMC_V580 || DMC_V590) {
-                nonflat_w2r_pre = stat_quc_rhit_high ? (que_read_cnt > CMD_RLEVELH) : ((que_write_cnt <= CMD_WLEVELL)
-                        || ((que_read_cnt + que_write_cnt) <= ALEVEL_W2R && (IS_HBM2E || IS_HBM3)));
-            } else {
-                nonflat_w2r_pre = que_write_cnt <= CMD_WLEVELL;
-            }
-            if (GetDmcQsize() < EXGRP_LEVEL && availability <= RWGRP_AUTO_BW) return NO_GROUP;
-            if (sch_tout_cmd && sch_tout_type == DATA_READ) return READ_GROUP;
-            if (high_qos_trig && has_read_cmd) return READ_GROUP;
-            if (((serial_cmd_cnt >= SERIAL_WLEVELL && nonflat_w2r_pre) ||
-                    serial_cmd_cnt >= SERIAL_WLEVELH || !has_write_cmd) && has_read_cmd) return READ_GROUP;
-            return WRITE_GROUP;
-        default:
-            return current_group;
-    }
-}
-
-void MemoryController::apply_rw_sync_group(uint8_t group, bool allow_local_fallback) {
-    if (rw_group_state.back() != group) {
+void MemoryController::SetRwSyncGroup(uint8_t group) {
+    rw_sync_group_valid = true;
+    rw_sync_group = group;
+    if (group != rw_group_state.back()) {
         rw_group_state.push_back(group);
-        if (DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- SYNC_GRP_CHG :: DMC["<<channel<<"] to "
-                    <<(group == READ_GROUP ? "READ_GROUP" : "WRITE_GROUP")<<", rcnt="<<rw_sync_read_cnt
-                    <<", wcnt="<<rw_sync_write_cnt<<", rbub="<<rw_sync_read_bubble_cnt
-                    <<", wbub="<<rw_sync_write_bubble_cnt<<endl);
-        }
         serial_cmd_cnt = 0;
         rwgrp_ch_cmd_cnt = 0;
     }
-
-    if (allow_local_fallback && group == READ_GROUP && rw_sync_read_cnt == 0 && rw_sync_write_cnt != 0) {
-        in_write_group = true;
-    } else if (allow_local_fallback && group == WRITE_GROUP && rw_sync_write_cnt == 0 && rw_sync_read_cnt != 0) {
-        in_write_group = false;
-    } else {
-        in_write_group = group == WRITE_GROUP;
-    }
-
-    if (rw_group_state.size() > 8) {
-        rw_group_state.erase(rw_group_state.begin());
-    } else {
-        rw_group_state.push_back(rw_group_state.back());
-        rw_group_state.erase(rw_group_state.begin());
-    }
 }
 
-unsigned MemoryController::GetRwSyncReadCnt() const {
-    return rw_sync_read_cnt;
-}
-
-unsigned MemoryController::GetRwSyncWriteCnt() const {
-    return rw_sync_write_cnt;
-}
-
-unsigned MemoryController::GetRwSyncReadBubble() const {
-    return rw_sync_read_bubble_cnt;
-}
-
-unsigned MemoryController::GetRwSyncWriteBubble() const {
-    return rw_sync_write_bubble_cnt;
-}
-
-bool MemoryController::GetRwSyncSwitchReadFlag() const {
-    return rw_sync_switch_read_flag;
-}
-
-bool MemoryController::GetRwSyncSwitchWriteFlag() const {
-    return rw_sync_switch_write_flag;
-}
-
-bool MemoryController::HasPendingWork() const {
-    return !transactionQueue.empty() || !WriteResp.empty() || !ReadResp.empty() || !CmdResp.empty()
-            || dresp_cnt != 0 || (que_read_cnt + que_write_cnt) != 0;
-}
-
-unsigned MemoryController::GetDmcAvailability() const {
-    return availability;
-}
-
-unsigned MemoryController::GetDmcWriteAvailability() const {
-    return mrd_wr_availability;
-}
-
-uint8_t MemoryController::GetRwGroupTarget() const {
-    return rw_group_state.back();
-}
-
-uint8_t MemoryController::GetRwGroupCurrent() const {
-    return rw_group_state[0];
+void MemoryController::ClearRwSyncGroup() {
+    rw_sync_group_valid = false;
 }
 
 void MemoryController::update_que() {
@@ -7438,7 +7303,7 @@ void MemoryController::update_que() {
                     gen_rresp(t->task);
                 }
             }
-            if (!GRP_RANK_EN && (GRP_RW_EN || DMC_RW_SYNC_EN) && !t->timeout) {
+            if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) serial_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) rwgrp_ch_cmd_cnt ++;
             }
@@ -7466,7 +7331,7 @@ void MemoryController::update_que() {
             }
             que_write_cnt --;
             w_qos_cnt[t->qos] --;
-            if (!GRP_RANK_EN && (GRP_RW_EN || DMC_RW_SYNC_EN) && !t->timeout) {
+            if (!GRP_RANK_EN && GRP_RW_EN && !t->timeout) {
                 if (rw_group_state[0] == READ_GROUP) rwgrp_ch_cmd_cnt ++;
                 else if (rw_group_state[0] == WRITE_GROUP) serial_cmd_cnt ++;
             }
@@ -7995,8 +7860,8 @@ void MemoryController::data_fresh() {
                         if (step_weight == 0) step_weight = 1;
                         
                         ecc_wb_cnt += step_weight;
-                        if (ecc_wb_cnt >= ECC_WB_TH) {
-                            ecc_wb_cnt -= ECC_WB_TH; // 触发 ECC
+                        if ((rand() % 10000) <= ECC_WB_TH) {
+                            //ecc_wb_cnt -= ECC_WB_TH; // 触发 ECC
                             
                             // 计算释放时间戳
                             uint32_t ecc_penalty = ceil(float(tWB_DLY) / tDFI);
@@ -9208,11 +9073,10 @@ void MemoryController::lc(Transaction *t) {
         }
     }
 
-    if (rw_group_state[0] != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
+    uint8_t effective_rw_group = GetEffectiveRwGroup();
+    if (effective_rw_group != NO_GROUP && !t->timeout && t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD
             && !t->act_executing) {
-        // 原单通道逻辑
-        if (rw_group_state[0] == READ_GROUP && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))
-                && (!DMC_RW_SYNC_EN || rw_sync_read_cnt != 0)) {
+        if (effective_rw_group == READ_GROUP && rw_schedulable_read_cnt != 0 && t->transactionType != DATA_READ && (!LQOS_BP_EN || (lqos_rd_bp && LQOS_BP_EN))) {
             if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_W2R_TH || !in_write_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: Read group backpress a write command. task="
@@ -9220,7 +9084,7 @@ void MemoryController::lc(Transaction *t) {
                 }
                 return;
             }
-        } else if (rw_group_state[0] == READ_GROUP && t->transactionType == DATA_READ && RCMD_HQOS_RANK_SWITCH_EN) {
+        } else if (effective_rw_group == READ_GROUP && t->transactionType == DATA_READ && RCMD_HQOS_RANK_SWITCH_EN) {
             if ((t->nextCmd == READ_CMD || t->nextCmd == READ_P_CMD) && !rank_cmd_high_qos[t->rank] &&
                     ((unsigned)accumulate(rank_cmd_high_qos.begin(), rank_cmd_high_qos.end(), 0) >= 1)) {
                 if (DEBUG_BUS) {
@@ -9229,8 +9093,7 @@ void MemoryController::lc(Transaction *t) {
                 }
                 return;
             }
-        } else if (rw_group_state[0] == WRITE_GROUP && t->transactionType == DATA_READ && (!LQOS_BP_EN || (lqos_wr_bp && LQOS_BP_EN))
-                && (!DMC_RW_SYNC_EN || rw_sync_write_cnt != 0)) {
+        } else if (effective_rw_group == WRITE_GROUP && rw_schedulable_write_cnt != 0 && t->transactionType == DATA_READ && (!LQOS_BP_EN || (lqos_wr_bp && LQOS_BP_EN))) {
             if (t->nextCmd == activate_cmd || rwgrp_ch_cmd_cnt >= RW_GRPCHG_R2W_TH || in_write_group) {
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- LC :: Write group backpress a read command. task="
