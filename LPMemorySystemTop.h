@@ -96,6 +96,12 @@ public:
     vector<Rmw*> rmws;
 
 private:
+    bool rw_sync_group_valid;
+    uint8_t rw_sync_group;
+    unsigned rw_sync_serial_cmd_cnt;
+    uint64_t rw_sync_prev_reads;
+    uint64_t rw_sync_prev_writes;
+    void update_rw_sync_group();
     class DmcCallbackProxy {
     public:
         DmcCallbackProxy(LPMemorySystemTop *parent_, unsigned dmc_id_);
