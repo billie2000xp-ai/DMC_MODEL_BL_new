@@ -652,7 +652,7 @@ bool MemorySystem::addWriteDataPending(uint64_t task, unsigned remaining_beats, 
 
 //==============================================================================
 void MemorySystem::InitOutputFiles() {
-    if ((DEBUG_BUS || DEBUG_STATE || DEBUG_GBUF_STATE) && (channel_ohot == (channel_ohot & PRINT_CH_OHOT))) {
+    if ((DEBUG_BUS || DEBUG_STATE || DEBUG_GBUF_STATE)) {
         dmc_log = log_path + "/lpddr_sim" + std::to_string(channel) + ".log";
         DDRSim_log.open(dmc_log.c_str(),ios_base::out | ios_base::trunc);
         if (!DDRSim_log) {
