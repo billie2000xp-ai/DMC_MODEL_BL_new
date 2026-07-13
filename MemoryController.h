@@ -189,11 +189,26 @@ public:
     void update_deque_fifo();
     inline unsigned data_cnt_perburst(unsigned length) {
             return ((DmcLog2(length, JEDEC_DATA_BUS_BITS)) / DMC_DATA_BUS_BITS);}
+    struct RwGroupSnapshot {
+        unsigned read_cnt;
+        unsigned write_cnt;
+        unsigned schedulable_read_cnt;
+        unsigned schedulable_write_cnt;
+        unsigned availability;
+        unsigned high_qos_read_cnt;
+        uint64_t read_retired_total;
+        uint64_t write_retired_total;
+        uint64_t rw_cmd_total;
+        uint64_t act_cmd_total;
+        uint64_t timeout_read_total;
+        uint64_t timeout_write_total;
+    };
     unsigned Read_Cnt() {return que_read_cnt;};
     unsigned Write_Cnt() {return que_write_cnt;};
     unsigned SchedulableReadCnt() const {return rw_schedulable_read_cnt;};
     unsigned SchedulableWriteCnt() const {return rw_schedulable_write_cnt;};
     uint8_t GetLocalRwGroup() const {return rw_group_state[0];};
+    RwGroupSnapshot GetRwGroupSnapshot() const;
     uint8_t GetEffectiveRwGroup() const;
     void SetRwSyncGroup(uint8_t group);
     void ClearRwSyncGroup();
@@ -420,6 +435,12 @@ public:
     vector <uint8_t> rw_group_state;
     unsigned rw_schedulable_read_cnt;
     unsigned rw_schedulable_write_cnt;
+    uint64_t rw_group_read_retired_total;
+    uint64_t rw_group_write_retired_total;
+    uint64_t rw_group_rw_cmd_total;
+    uint64_t rw_group_act_cmd_total;
+    uint64_t rw_group_timeout_read_total;
+    uint64_t rw_group_timeout_write_total;
     bool rw_sync_group_valid;
     uint8_t rw_sync_group;
     bool in_write_group;
