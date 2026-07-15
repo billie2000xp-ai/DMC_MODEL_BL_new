@@ -49,7 +49,7 @@ class Rmw:public SimulatorObject {
 
     public:
     Rmw(LPMemorySystemTop *_top, unsigned id, unsigned log_id, ostream &DDRSim_log_, string LogPath);
-    virtual ~Rmw() {};
+    virtual ~Rmw();
     bool addTransaction(Transaction * trans);
     void update_cresp();
     bool addData(uint32_t *data, uint32_t channel, uint64_t task);
@@ -73,6 +73,16 @@ class Rmw:public SimulatorObject {
     std::vector<uint64_t> WdataToSend;
     std::vector<uint32_t> WdataChannel;
     std::vector<Transaction *> RmwQue;
+
+    struct WdataOrderEntry {
+        uint64_t task;
+        unsigned remaining_beats;
+        WdataOrderEntry(uint64_t task_, unsigned remaining_beats_)
+                : task(task_), remaining_beats(remaining_beats_) {}
+    };
+    std::vector<WdataOrderEntry> wdata_order_queue;
+    void track_write_command(uint64_t task, unsigned beats);
+    void check_write_data(uint64_t task);
 
     string rmw_log;
 //    string log_path;
@@ -121,6 +131,22 @@ class Rmw:public SimulatorObject {
     
     uint64_t start_cycle;
     uint64_t end_cycle;
+
+    // #region debug-point D:rmw-occupancy
+    uint64_t dbg_cycles = 0;
+    uint64_t dbg_full_cycles = 0;
+    uint64_t dbg_no_ready_cycles = 0;
+    uint64_t dbg_dmc_rejects = 0;
+    uint64_t dbg_dispatches = 0;
+    unsigned dbg_max_queue = 0;
+    uint64_t dbg_reject_mc_occupancy_sum = 0;
+    uint64_t dbg_reject_mc_wb_sum = 0;
+    uint64_t dbg_reject_mc_mask_read_sum = 0;
+    uint64_t dbg_reject_rmw_ready_sum = 0;
+    uint64_t dbg_reject_rmw_waiting_sum = 0;
+    unsigned dbg_reject_mc_occupancy_max = 0;
+    unsigned dbg_reject_mc_wb_max = 0;
+    // #endregion
 
     private:
 //    std::vector<Transaction *> RmwQue;
