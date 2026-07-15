@@ -65,6 +65,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
 #endif
     read_cb = NULL;
     write_cb = NULL;
+    extended_write_cb = NULL;
     read_done_cb = NULL;
     cmd_done_cb = NULL;
     top_rdata_active = false;
@@ -1004,7 +1005,11 @@ bool LPMemorySystemTop::handle_write_done(unsigned dmc_id, unsigned channel, uin
         double readDataEnterDmcTime, double reqAddToDmcTime, double reqEnterDmcBufTime) {
     (void)channel;
     if (top_wresp_fifo.size() >= TOP_RESP_FIFO_DEPTH) return false;
-    top_wresp_fifo.push_back({hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime});
+    auto merged = merged_write_tasks.find(task);
+    bool merge_flag = merged != merged_write_tasks.end();
+    uint64_t first_task = merge_flag ? merged->second : 0xffffffffffffffffull;
+    if (merge_flag) merged_write_tasks.erase(merged);
+    top_wresp_fifo.push_back({hhaId * NUM_CHANS + dmc_id, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime, merge_flag, first_task});
     return true;
 }
 
@@ -1355,7 +1360,10 @@ void LPMemorySystemTop::update() {
     // 2. 吐出 Write Response
     if (!top_wresp_fifo.empty()) {
         auto &pkt = top_wresp_fifo.front();
-        if (write_cb == NULL || (*write_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+        bool accepted = extended_write_cb != NULL
+                ? (*extended_write_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime, pkt.merge_flag, pkt.first_task)
+                : (write_cb == NULL || (*write_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime));
+        if (accepted) {
             top_wresp_fifo.pop_front();
         }
     }
@@ -1508,6 +1516,24 @@ void LPMemorySystemTop::RegisterCallbacks(
     TransactionCompleteCB *cmdDone ) {
     read_cb = readData;
     write_cb = writeDone;
+    extended_write_cb = NULL;
+    read_done_cb = readDone;
+    cmd_done_cb = cmdDone;
+
+    for (size_t i=0; i<NUM_CHANS; i++) {
+        channels[i]->RegisterCallbacks(proxy_read_cbs[i], proxy_write_cbs[i],
+                proxy_read_done_cbs[i], proxy_cmd_cbs[i]);
+    }
+}
+
+void LPMemorySystemTop::RegisterCallbacks(
+    TransactionCompleteCB *readData,
+    WriteTransactionCompleteCB *writeDone,
+    TransactionCompleteCB *readDone,
+    TransactionCompleteCB *cmdDone ) {
+    read_cb = readData;
+    write_cb = NULL;
+    extended_write_cb = writeDone;
     read_done_cb = readDone;
     cmd_done_cb = cmdDone;
 
@@ -1556,6 +1582,10 @@ bool LPMemorySystemTop::emit_write_done(unsigned channel, uint64_t task, double 
         double reqAddToDmcTime, double reqEnterDmcBufTime) {
     if (write_cb == NULL) return true;
     return (*write_cb)(channel, task, readDataEnterDmcTime, reqAddToDmcTime, reqEnterDmcBufTime);
+}
+
+void LPMemorySystemTop::mark_merged_write(uint64_t task, uint64_t first_task) {
+    merged_write_tasks[task] = first_task;
 }
 
 uint8_t LPMemorySystemTop::addr_map_ch(const hha_command &c) {
