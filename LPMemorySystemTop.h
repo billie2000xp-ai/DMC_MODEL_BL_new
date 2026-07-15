@@ -16,6 +16,7 @@
 #include "IniReader.h"
 #include "assert.h"
 #include <deque>
+#include <set>
 #include <map>
 
 namespace LPDDRSim {
@@ -54,6 +55,8 @@ public:
     void update();
     void RegisterCallbacks(TransactionCompleteCB *readData,
             TransactionCompleteCB *writeDone,TransactionCompleteCB *readDone, TransactionCompleteCB *cmdDone);
+    void RegisterCallbacks(TransactionCompleteCB *readData,
+            WriteTransactionCompleteCB *writeDone,TransactionCompleteCB *readDone, TransactionCompleteCB *cmdDone);
     void InitOutputFiles();
     bool addData(uint32_t *data,uint32_t channel,uint64_t id);
     void read_complete(unsigned id, uint64_t address, uint64_t clk);
@@ -70,6 +73,7 @@ public:
     uint32_t getRmwQueueCmdNum() const;
     bool emit_write_done(unsigned channel, uint64_t task, double readDataEnterDmcTime,
         double reqAddToDmcTime, double reqEnterDmcBufTime);
+    void mark_merged_write(uint64_t task, uint64_t first_task);
 
     //output file
     ofstream DDRSim_log;
@@ -128,6 +132,7 @@ private:
 
     TransactionCompleteCB *read_cb;
     TransactionCompleteCB *write_cb;
+    WriteTransactionCompleteCB *extended_write_cb;
     TransactionCompleteCB *read_done_cb;
     TransactionCompleteCB *cmd_done_cb;
     vector<DmcCallbackProxy *> dmc_callback_proxies;
@@ -138,6 +143,8 @@ private:
         double readDataEnterDmcTime;
         double reqAddToDmcTime;
         double reqEnterDmcBufTime;
+        bool merge_flag;
+        uint64_t first_task;
         // 记录这个 task 原始总共包含多少拍数据
         // unsigned task_total_beats;
     };
@@ -157,6 +164,7 @@ private:
     vector<TransactionCompleteCB *> proxy_write_cbs;
     vector<TransactionCompleteCB *> proxy_read_done_cbs;
     vector<TransactionCompleteCB *> proxy_cmd_cbs;
+    std::map<uint64_t, uint64_t> merged_write_tasks;
 
     void command_check(const hha_command &c);
     void wdata_check(uint64_t task, uint8_t channel);
