@@ -44,6 +44,36 @@ private:
 };
 
 typedef CallbackBase <bool, unsigned, uint64_t, double, double, double> TransactionCompleteCB;
+
+template <typename ReturnT, typename Param1T, typename Param2T, typename Param3T, typename Param4T, typename Param5T, typename Param6T, typename Param7T>
+class ExtendedCallbackBase {
+public:
+    virtual ~ExtendedCallbackBase() = 0;
+    virtual ReturnT operator()(Param1T, Param2T, Param3T, Param4T, Param5T, Param6T, Param7T) = 0;
+};
+
+template <typename Return, typename Param1T, typename Param2T, typename Param3T, typename Param4T, typename Param5T, typename Param6T, typename Param7T>
+LPDDRSim::ExtendedCallbackBase<Return,Param1T,Param2T,Param3T,Param4T,Param5T,Param6T,Param7T>::~ExtendedCallbackBase() {}
+
+template <typename ConsumerT, typename ReturnT, typename Param1T, typename Param2T,
+         typename Param3T, typename Param4T, typename Param5T, typename Param6T, typename Param7T>
+class ExtendedCallback: public ExtendedCallbackBase<ReturnT,Param1T,Param2T,Param3T,Param4T,Param5T,Param6T,Param7T> {
+private:
+    typedef ReturnT (ConsumerT::*PtrMember)(Param1T,Param2T,Param3T,Param4T,Param5T,Param6T,Param7T);
+
+public:
+    ExtendedCallback(ConsumerT* const object, PtrMember member) : object(object), member(member) {}
+
+    ReturnT operator()(Param1T param1, Param2T param2, Param3T param3, Param4T param4, Param5T param5, Param6T param6, Param7T param7) {
+        return (const_cast<ConsumerT*>(object)->*member)(param1,param2,param3,param4,param5,param6,param7);
+    }
+
+private:
+    ConsumerT* const object;
+    const PtrMember member;
+};
+
+typedef ExtendedCallbackBase<bool, unsigned, uint64_t, double, double, double, bool, uint64_t> WriteTransactionCompleteCB;
 } // namespace DDRSim
 
 #endif
