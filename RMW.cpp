@@ -73,28 +73,6 @@ Rmw::Rmw(LPMemorySystemTop *_top, unsigned id, unsigned log_id, ostream &DDRSim_
     }
 
 Rmw::~Rmw() {
-    // #region debug-point D:rmw-occupancy
-    std::ostringstream dbg_payload;
-    dbg_payload << "{\"sessionId\":\"v200-trace-low-bandwidth\",\"runId\":\"pre\",\"hypothesisId\":\"H1-H3\",\"location\":\"Rmw::~Rmw\",\"msg\":\"[DEBUG] rmw and mc summary\",\"data\":{\"channel\":"
-        << log_channel << ",\"cycles\":" << dbg_cycles << ",\"fullCycles\":" << dbg_full_cycles
-        << ",\"noReadyCycles\":" << dbg_no_ready_cycles << ",\"dmcRejects\":" << dbg_dmc_rejects
-        << ",\"dispatches\":" << dbg_dispatches << ",\"maxQueue\":" << dbg_max_queue
-        << ",\"rejectMcOccupancySum\":" << dbg_reject_mc_occupancy_sum
-        << ",\"rejectMcWbSum\":" << dbg_reject_mc_wb_sum
-        << ",\"rejectMcMaskReadSum\":" << dbg_reject_mc_mask_read_sum
-        << ",\"rejectRmwReadySum\":" << dbg_reject_rmw_ready_sum
-        << ",\"rejectRmwWaitingSum\":" << dbg_reject_rmw_waiting_sum
-        << ",\"rejectMcOccupancyMax\":" << dbg_reject_mc_occupancy_max
-        << ",\"rejectMcWbMax\":" << dbg_reject_mc_wb_max << "}}";
-    std::string dbg_json = dbg_payload.str();
-    size_t dbg_quote = 0;
-    while ((dbg_quote = dbg_json.find('"', dbg_quote)) != std::string::npos) {
-        dbg_json.insert(dbg_quote, 1, '\\');
-        dbg_quote += 2;
-    }
-    std::string dbg_command = "curl.exe -s -X POST http://127.0.0.1:7777/event -H \"Content-Type: application/json\" -d \"" + dbg_json + "\" > NUL";
-    std::system(dbg_command.c_str());
-    // #endregion
 }
 
 //void WriteBuff::rcmd_push_wcmd(Transaction * t) {
@@ -839,19 +817,6 @@ void Rmw::update_cresp() {
 }
 
 void Rmw::update() {
-    // #region debug-point D:rmw-occupancy
-    dbg_cycles++;
-    dbg_max_queue = std::max(dbg_max_queue, rmw_cmd_cnt);
-    if (full()) dbg_full_cycles++;
-    bool dbg_has_ready = false;
-    for (size_t i = 0; i < RmwQue.size(); i++) {
-        if (RmwQue[i]->transactionType == DATA_READ || RmwCmdState[i]->rmwState == SEND_READY) {
-            dbg_has_ready = true;
-            break;
-        }
-    }
-    if (!RmwQue.empty() && !dbg_has_ready) dbg_no_ready_cycles++;
-    // #endregion
     update_cresp();
     update_write_merge_resp();
 #if 0
@@ -1020,9 +985,6 @@ void Rmw::arb_node() {
                 if (write_merge_first_resp_task.find(RmwQue[i]->task) != write_merge_first_resp_task.end()) {
                     top->mark_merged_write(RmwQue[i]->task, write_merge_first_resp_task[RmwQue[i]->task]);
                 }
-                // #region debug-point D:rmw-occupancy
-                dbg_dispatches++;
-                // #endregion
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- RMW SCH :: task="<<RmwQue[i]->task<<" type="<<RmwQue[i]->transactionType<<" mask_write="<<RmwQue[i]->mask_wcmd
                             <<" qos="<<RmwQue[i]->qos<<" burst_length:"<<RmwQue[i]->burst_length<<" channel="<<RmwQue[i]->channel<<" data_ready_cnt="<<RmwQue[i]->data_ready_cnt<<" address="<<hex<<RmwQue[i]->address
@@ -1076,30 +1038,6 @@ void Rmw::arb_node() {
                 RmwQue.erase(RmwQue.begin() + i);
                 break;
             } else {
-                // #region debug-point D:rmw-occupancy
-                dbg_dmc_rejects++;
-                unsigned mc_occupancy = 0;
-                unsigned mc_wb = 0;
-                unsigned mc_mask_read = 0;
-                for (auto *mc_trans : top->channels[ch]->memoryController->transactionQueue) {
-                    mc_occupancy++;
-                    if (mc_trans->wb) mc_wb++;
-                    if (mc_trans->transactionType == DATA_READ && mc_trans->mask_wcmd) mc_mask_read++;
-                }
-                unsigned rmw_ready = 0;
-                unsigned rmw_waiting = 0;
-                for (unsigned j = 0; j < RmwCmdState.size(); j++) {
-                    if (RmwCmdState[j]->rmwState == SEND_READY) rmw_ready++;
-                    if (RmwCmdState[j]->rmwState == QUE_WAITING) rmw_waiting++;
-                }
-                dbg_reject_mc_occupancy_sum += mc_occupancy;
-                dbg_reject_mc_wb_sum += mc_wb;
-                dbg_reject_mc_mask_read_sum += mc_mask_read;
-                dbg_reject_rmw_ready_sum += rmw_ready;
-                dbg_reject_rmw_waiting_sum += rmw_waiting;
-                dbg_reject_mc_occupancy_max = std::max(dbg_reject_mc_occupancy_max, mc_occupancy);
-                dbg_reject_mc_wb_max = std::max(dbg_reject_mc_wb_max, mc_wb);
-                // #endregion
             }
         } else {
             ERROR(setw(10)<<now()<<" -- Such Cmd Not Expected, task="<<RmwQue[i]->task<<" type="<<RmwQue[i]->transactionType
