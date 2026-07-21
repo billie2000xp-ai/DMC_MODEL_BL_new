@@ -20,6 +20,7 @@ z8a4Ah46TttGgH3S# */
 #include <iomanip>
 #include <math.h>
 #include "LPMemorySystemTop.h"
+#include "../Monitor/Monitor.h"
 #include "AddressMapping.h"
 #include "TimingCalculate.h"
 #include "IniReader.h"
@@ -79,6 +80,12 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     rw_sync_reverse_cmd_cnt = 0;
     rw_sync_rw_cmd_num = 0;
     rw_sync_act_cmd_num = 0;
+    trace_prefix = "LPTOP" + std::to_string(hhaId) + "_";
+    trace_wdata_in_valid = false;
+    trace_wdata_in_accept = false;
+    trace_rdata_out_valid = false;
+    trace_rdata_out_accept = false;
+    traceRegister();
 
 #ifdef SYSARCH_PLATFORM
     IniFilename = "parameter/public.ini";
@@ -1345,7 +1352,11 @@ void LPMemorySystemTop::update() {
         }
         if (top_rdata_ready_to_send && idx < top_rdata_fifo.size()) {
             TopRespPacket pkt = top_rdata_fifo[idx];
+            trace_rdata_out_valid = true;
+            trace_rdata_out_task = pkt.task;
+            trace_rdata_out_channel = pkt.channel;
             if (read_cb == NULL || (*read_cb)(pkt.channel, pkt.task, pkt.readDataEnterDmcTime, pkt.reqAddToDmcTime, pkt.reqEnterDmcBufTime)) {
+                trace_rdata_out_accept = true;
                 top_rdata_fifo.erase(top_rdata_fifo.begin() + idx);
                 auto it2 = expected_read_beats_map.find(pkt.task);
                 if (it2 != expected_read_beats_map.end()) {
@@ -1383,6 +1394,39 @@ void LPMemorySystemTop::update() {
             top_cmdresp_fifo.pop_front();
         }
     }
+    traceSample();
+}
+
+void LPMemorySystemTop::traceRegister() {
+    TRACE_ADD(trace_prefix + "WDATA_IN_VALID", 1);
+    TRACE_ADD(trace_prefix + "WDATA_IN_ACCEPT", 1);
+    TRACE_ADD(trace_prefix + "WDATA_IN_TASK", 64);
+    TRACE_ADD(trace_prefix + "WDATA_IN_CHANNEL", 8);
+    TRACE_ADD(trace_prefix + "RDATA_FIFO_LEVEL", 16);
+    TRACE_ADD(trace_prefix + "RDATA_OUT_VALID", 1);
+    TRACE_ADD(trace_prefix + "RDATA_OUT_ACCEPT", 1);
+    TRACE_ADD(trace_prefix + "RDATA_OUT_TASK", 64);
+    TRACE_ADD(trace_prefix + "RDATA_OUT_CHANNEL", 8);
+    TRACE_ADD(trace_prefix + "RW_SYNC_VALID", 1);
+    TRACE_ADD(trace_prefix + "RW_SYNC_GROUP", 2);
+}
+
+void LPMemorySystemTop::traceSample() {
+    TRACE_LOG(trace_prefix + "WDATA_IN_VALID", trace_wdata_in_valid);
+    TRACE_LOG(trace_prefix + "WDATA_IN_ACCEPT", trace_wdata_in_accept);
+    TRACE_LOG(trace_prefix + "WDATA_IN_TASK", trace_wdata_in_task);
+    TRACE_LOG(trace_prefix + "WDATA_IN_CHANNEL", trace_wdata_in_channel);
+    TRACE_LOG(trace_prefix + "RDATA_FIFO_LEVEL", top_rdata_fifo.size());
+    TRACE_LOG(trace_prefix + "RDATA_OUT_VALID", trace_rdata_out_valid);
+    TRACE_LOG(trace_prefix + "RDATA_OUT_ACCEPT", trace_rdata_out_accept);
+    TRACE_LOG(trace_prefix + "RDATA_OUT_TASK", trace_rdata_out_task);
+    TRACE_LOG(trace_prefix + "RDATA_OUT_CHANNEL", trace_rdata_out_channel);
+    TRACE_LOG(trace_prefix + "RW_SYNC_VALID", rw_sync_group_valid);
+    TRACE_LOG(trace_prefix + "RW_SYNC_GROUP", rw_sync_group);
+    trace_wdata_in_valid = false;
+    trace_wdata_in_accept = false;
+    trace_rdata_out_valid = false;
+    trace_rdata_out_accept = false;
 }
 
 uint8_t LPMemorySystemTop::get_occ(uint8_t chl) {
@@ -1491,11 +1535,15 @@ uint32_t LPMemorySystemTop::getDmcPressureLevel() {
 }
 
 bool LPMemorySystemTop::addData(uint32_t *data,uint32_t channel,uint64_t id) {
+    trace_wdata_in_valid = true;
+    trace_wdata_in_task = id;
+    trace_wdata_in_channel = channel;
     if (EM_ENABLE && EM_MODE==0) channel = 0;
     Rmw *target_rmw = rmws[channel];
     bool use_rmw_path = RMW_ENABLE || WCMD_MERGE_EN;
 
     if (use_rmw_path && target_rmw->pre_req_data_time == target_rmw->now()) {
+        trace_wdata_in_accept = false;
         return false;
     }
     
@@ -1505,6 +1553,7 @@ bool LPMemorySystemTop::addData(uint32_t *data,uint32_t channel,uint64_t id) {
     } else {
         ret = channels[channel]->addData(data, id, false);
     }
+    trace_wdata_in_accept = ret;
     return ret;
 }
 
