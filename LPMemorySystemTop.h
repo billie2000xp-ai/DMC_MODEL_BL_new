@@ -157,6 +157,17 @@ private:
     bool top_rdata_active;
     uint64_t top_rdata_task;
     unsigned top_rdata_remain;
+    string trace_prefix;
+    bool trace_wdata_in_valid;
+    bool trace_wdata_in_accept;
+    uint64_t trace_wdata_in_task;
+    unsigned trace_wdata_in_channel;
+    bool trace_rdata_out_valid;
+    bool trace_rdata_out_accept;
+    uint64_t trace_rdata_out_task;
+    unsigned trace_rdata_out_channel;
+    void traceRegister();
+    void traceSample();
     
     const size_t TOP_RESP_FIFO_DEPTH = 88;
 
