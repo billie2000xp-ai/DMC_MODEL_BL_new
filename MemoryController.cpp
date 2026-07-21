@@ -1,5 +1,6 @@
 #include "MemoryController.h"
 #include "MemorySystem.h"
+#include "../Monitor/Monitor.h"
 
 using namespace LPDDRSim;
 //==============================================================================
@@ -12,6 +13,15 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     channel = parentMemorySystem->systemID * NUM_CHANS + parentMemorySystem->dmc_id;
     sub_cha = parentMemorySystem->dmc_id; 
     channel_ohot = 1ull << channel;
+    trace_prefix = "LPTOP" + std::to_string(parentMemorySystem->systemID) + "_DMC" +
+            std::to_string(sub_cha) + "_";
+    trace_cmd_in_valid = false;
+    trace_cmd_in_accept = false;
+    trace_wdata_in_valid = false;
+    trace_dfi_cmd_fire = false;
+    trace_dfi_wdata_valid = false;
+    trace_dfi_rdata_valid = false;
+    traceRegister();
     PostCalcTiming();
     //bus related fields
     cmdCyclesLeft = 0;
@@ -1163,6 +1173,8 @@ unsigned MemoryController::get_rdata_chunk_beats(const TRANS_MSG &msg) const {
 
 //receive the write data from CPU
 void MemoryController::receiveFromCPU(unsigned int *data, uint64_t task) {
+    trace_wdata_in_valid = true;
+    trace_wdata_in_task = task;
     unsigned second_time = 0;
     unsigned third_time = 0;
     if (!IECC_ENABLE || (!tasks_info[task].wr_ecc && !tasks_info[task].rd_ecc)) {
@@ -3199,6 +3211,13 @@ void MemoryController::exec() {
             }
         }
         if (command_pend == 0) {
+            trace_dfi_cmd_fire = true;
+            trace_dfi_cmd_type = command.type;
+            trace_dfi_cmd_task = command.task;
+            trace_dfi_cmd_bank_index = command.bankIndex;
+            trace_dfi_cmd_row = command.row;
+            trace_dfi_cmd_addr_col = command.addr_col;
+            trace_dfi_cmd_bl = command.bl;
             phy p;
             p.command = command;
             p.delay = tCMD_PHY;
@@ -6704,6 +6723,7 @@ void MemoryController::update() {
     ehs_page_adapt_policy();
 
     update_deque_fifo();
+    traceSample();
 }
 
 #if 0
@@ -7831,6 +7851,9 @@ void MemoryController::data_fresh() {
 
         if (writeDataToSend[0].delay == 0) {
             uint64_t wr_task = writeDataToSend[0].task; // 获取当前 task
+            trace_dfi_wdata_valid = true;
+            trace_dfi_wdata_task = wr_task;
+            trace_dfi_wdata_bl = writeDataToSend[0].bl;
             
             auto it = wdata_info.find(wr_task);
             if (it != wdata_info.end()) {
@@ -9589,6 +9612,144 @@ void MemoryController::update_deque_fifo() {
     //}
 }
 
+void MemoryController::traceRegister() {
+    TRACE_ADD(trace_prefix + "CMD_IN_VALID", 1);
+    TRACE_ADD(trace_prefix + "CMD_IN_ACCEPT", 1);
+    TRACE_ADD(trace_prefix + "CMD_IN_TYPE", 1);
+    TRACE_ADD(trace_prefix + "CMD_IN_TASK", 64);
+    TRACE_ADD(trace_prefix + "CMD_IN_ADDRESS", 64);
+    TRACE_ADD(trace_prefix + "CMD_IN_DATA_SIZE", 32);
+    TRACE_ADD(trace_prefix + "CMD_IN_BURST_LENGTH", 16);
+    TRACE_ADD(trace_prefix + "CMD_IN_BANK", 16);
+    TRACE_ADD(trace_prefix + "CMD_IN_ROW", 32);
+    TRACE_ADD(trace_prefix + "WDATA_IN_VALID", 1);
+    TRACE_ADD(trace_prefix + "WDATA_IN_TASK", 64);
+    TRACE_ADD(trace_prefix + "QUEUE_READ_CNT", 16);
+    TRACE_ADD(trace_prefix + "QUEUE_WRITE_CNT", 16);
+    TRACE_ADD(trace_prefix + "SCHED_READ_CNT", 16);
+    TRACE_ADD(trace_prefix + "SCHED_WRITE_CNT", 16);
+    TRACE_ADD(trace_prefix + "RW_GROUP_LOCAL", 2);
+    TRACE_ADD(trace_prefix + "RW_GROUP_TARGET", 2);
+    TRACE_ADD(trace_prefix + "RW_GROUP_EFFECTIVE", 2);
+    TRACE_ADD(trace_prefix + "RW_IN_WRITE_GROUP", 1);
+    TRACE_ADD(trace_prefix + "RW_SERIAL_CMD_CNT", 8);
+    TRACE_ADD(trace_prefix + "RW_REVERSE_CMD_CNT", 8);
+    TRACE_ADD(trace_prefix + "RPFIFO_BP", 1);
+    TRACE_ADD(trace_prefix + "RPFIFO_LEVEL", 16);
+    TRACE_ADD(trace_prefix + "RPFIFO_AMFULL", 1);
+    TRACE_ADD(trace_prefix + "DFI_CMD_VALID", 1);
+    TRACE_ADD(trace_prefix + "DFI_CMD_FIRE", 1);
+    TRACE_ADD(trace_prefix + "DFI_CMD_TYPE", 6);
+    TRACE_ADD(trace_prefix + "DFI_CMD_TASK", 64);
+    TRACE_ADD(trace_prefix + "DFI_CMD_BANK", 16);
+    TRACE_ADD(trace_prefix + "DFI_CMD_ROW", 32);
+    TRACE_ADD(trace_prefix + "DFI_CMD_COL", 32);
+    TRACE_ADD(trace_prefix + "DFI_CMD_BL", 16);
+    TRACE_ADD(trace_prefix + "DFI_WDATA_VALID", 1);
+    TRACE_ADD(trace_prefix + "DFI_WDATA_TASK", 64);
+    TRACE_ADD(trace_prefix + "DFI_WDATA_BL", 16);
+    TRACE_ADD(trace_prefix + "DFI_RDATA_VALID", 1);
+    TRACE_ADD(trace_prefix + "DFI_RDATA_TASK", 64);
+    TRACE_ADD(trace_prefix + "DFI_RDATA_RANK", 8);
+#if defined(WAVE_QUEUE_LEVEL)
+    size_t trace_queue_level = std::min<size_t>(WAVE_QUEUE_LEVEL, TRANS_QUEUE_DEPTH);
+    for (size_t i = 0; i < trace_queue_level; i++) {
+        string slot = trace_prefix + "QUEUE" + std::to_string(i) + "_";
+        TRACE_ADD(slot + "VALID", 1);
+        TRACE_ADD(slot + "TASK", 64);
+        TRACE_ADD(slot + "TYPE", 1);
+        TRACE_ADD(slot + "BANK", 16);
+        TRACE_ADD(slot + "ROW", 32);
+        TRACE_ADD(slot + "COL", 32);
+        TRACE_ADD(slot + "WDATA_READY", 1);
+        TRACE_ADD(slot + "DATA_READY_CNT", 16);
+        TRACE_ADD(slot + "BURST_LENGTH", 16);
+    }
+#endif
+}
+
+void MemoryController::traceSample() {
+    TRACE_LOG(trace_prefix + "CMD_IN_VALID", trace_cmd_in_valid);
+    TRACE_LOG(trace_prefix + "CMD_IN_ACCEPT", trace_cmd_in_accept);
+    TRACE_LOG(trace_prefix + "CMD_IN_TYPE", trace_cmd_in_type);
+    TRACE_LOG(trace_prefix + "CMD_IN_TASK", trace_cmd_in_task);
+    TRACE_LOG(trace_prefix + "CMD_IN_ADDRESS", trace_cmd_in_address);
+    TRACE_LOG(trace_prefix + "CMD_IN_DATA_SIZE", trace_cmd_in_data_size);
+    TRACE_LOG(trace_prefix + "CMD_IN_BURST_LENGTH", trace_cmd_in_burst_length);
+    TRACE_LOG(trace_prefix + "CMD_IN_BANK", trace_cmd_in_bank_index);
+    TRACE_LOG(trace_prefix + "CMD_IN_ROW", trace_cmd_in_row);
+    TRACE_LOG(trace_prefix + "WDATA_IN_VALID", trace_wdata_in_valid);
+    TRACE_LOG(trace_prefix + "WDATA_IN_TASK", trace_wdata_in_task);
+    TRACE_LOG(trace_prefix + "QUEUE_READ_CNT", que_read_cnt);
+    TRACE_LOG(trace_prefix + "QUEUE_WRITE_CNT", que_write_cnt);
+    TRACE_LOG(trace_prefix + "SCHED_READ_CNT", rw_schedulable_read_cnt);
+    TRACE_LOG(trace_prefix + "SCHED_WRITE_CNT", rw_schedulable_write_cnt);
+    TRACE_LOG(trace_prefix + "RW_GROUP_LOCAL", rw_group_state.front());
+    TRACE_LOG(trace_prefix + "RW_GROUP_TARGET", rw_group_state.back());
+    TRACE_LOG(trace_prefix + "RW_GROUP_EFFECTIVE", GetEffectiveRwGroup());
+    TRACE_LOG(trace_prefix + "RW_IN_WRITE_GROUP", in_write_group);
+    TRACE_LOG(trace_prefix + "RW_SERIAL_CMD_CNT", serial_cmd_cnt);
+    TRACE_LOG(trace_prefix + "RW_REVERSE_CMD_CNT", rwgrp_ch_cmd_cnt);
+    TRACE_LOG(trace_prefix + "RPFIFO_BP", rcmd_bp_byrp);
+    TRACE_LOG(trace_prefix + "RPFIFO_LEVEL", rp_fifo.size());
+    TRACE_LOG(trace_prefix + "RPFIFO_AMFULL", rp_fifo.size() >= RPFIFO_AMFULL_TH);
+    TRACE_LOG(trace_prefix + "DFI_CMD_VALID", exec_valid);
+    TRACE_LOG(trace_prefix + "DFI_CMD_FIRE", trace_dfi_cmd_fire);
+    TRACE_LOG(trace_prefix + "DFI_CMD_TYPE", trace_dfi_cmd_type);
+    TRACE_LOG(trace_prefix + "DFI_CMD_TASK", trace_dfi_cmd_task);
+    TRACE_LOG(trace_prefix + "DFI_CMD_BANK", trace_dfi_cmd_bank_index);
+    TRACE_LOG(trace_prefix + "DFI_CMD_ROW", trace_dfi_cmd_row);
+    TRACE_LOG(trace_prefix + "DFI_CMD_COL", trace_dfi_cmd_addr_col);
+    TRACE_LOG(trace_prefix + "DFI_CMD_BL", trace_dfi_cmd_bl);
+    TRACE_LOG(trace_prefix + "DFI_WDATA_VALID", trace_dfi_wdata_valid);
+    TRACE_LOG(trace_prefix + "DFI_WDATA_TASK", trace_dfi_wdata_task);
+    TRACE_LOG(trace_prefix + "DFI_WDATA_BL", trace_dfi_wdata_bl);
+    TRACE_LOG(trace_prefix + "DFI_RDATA_VALID", trace_dfi_rdata_valid);
+    TRACE_LOG(trace_prefix + "DFI_RDATA_TASK", trace_dfi_rdata_task);
+    TRACE_LOG(trace_prefix + "DFI_RDATA_RANK", trace_dfi_rdata_rank);
+#if defined(WAVE_QUEUE_LEVEL)
+    size_t trace_queue_level = std::min<size_t>(WAVE_QUEUE_LEVEL, TRANS_QUEUE_DEPTH);
+    for (size_t i = 0; i < trace_queue_level; i++) {
+        string slot = trace_prefix + "QUEUE" + std::to_string(i) + "_";
+        bool valid = i < transactionQueue.size();
+        TRACE_LOG(slot + "VALID", valid);
+        if (valid) {
+            Transaction *trans = transactionQueue[i];
+            TRACE_LOG(slot + "TASK", trans->task);
+            TRACE_LOG(slot + "TYPE", trans->transactionType);
+            TRACE_LOG(slot + "BANK", trans->bankIndex);
+            TRACE_LOG(slot + "ROW", trans->row);
+            TRACE_LOG(slot + "COL", trans->addr_col);
+            TRACE_LOG(slot + "WDATA_READY", trans->transactionType == DATA_WRITE &&
+                    trans->data_ready_cnt == trans->burst_length + 1);
+            TRACE_LOG(slot + "DATA_READY_CNT", trans->data_ready_cnt);
+            TRACE_LOG(slot + "BURST_LENGTH", trans->burst_length);
+        } else {
+            TRACE_LOG(slot + "TASK", uint64_t(0));
+            TRACE_LOG(slot + "TYPE", uint64_t(0));
+            TRACE_LOG(slot + "BANK", uint64_t(0));
+            TRACE_LOG(slot + "ROW", uint64_t(0));
+            TRACE_LOG(slot + "COL", uint64_t(0));
+            TRACE_LOG(slot + "WDATA_READY", false);
+            TRACE_LOG(slot + "DATA_READY_CNT", uint64_t(0));
+            TRACE_LOG(slot + "BURST_LENGTH", uint64_t(0));
+        }
+    }
+#endif
+    trace_cmd_in_valid = false;
+    trace_cmd_in_accept = false;
+    trace_wdata_in_valid = false;
+    trace_dfi_cmd_fire = false;
+    trace_dfi_wdata_valid = false;
+    trace_dfi_rdata_valid = false;
+}
+
+void MemoryController::traceDfiRdata(uint64_t task, unsigned rank) {
+    trace_dfi_rdata_valid = true;
+    trace_dfi_rdata_task = task;
+    trace_dfi_rdata_rank = rank;
+}
+
 bool MemoryController::push_req(Transaction * trans) {
 //    DEBUG(now()<<" push_req0, sc_num="<<sc_num); 
     write_port_busy_this_cycle = true;
@@ -9620,6 +9781,15 @@ bool MemoryController::push_req(Transaction * trans) {
     }
 
     if (pos) {
+        trace_cmd_in_valid = true;
+        trace_cmd_in_accept = true;
+        trace_cmd_in_type = trans->transactionType;
+        trace_cmd_in_task = trans->task;
+        trace_cmd_in_address = trans->address;
+        trace_cmd_in_data_size = trans->data_size;
+        trace_cmd_in_burst_length = trans->burst_length;
+        trace_cmd_in_bank_index = trans->bankIndex;
+        trace_cmd_in_row = trans->row;
         DmcTotalBytes += trans->data_size;
         if (trans->transactionType == DATA_READ) DmcTotalReadBytes += trans->data_size;
         else DmcTotalWriteBytes += trans->data_size;
