@@ -7115,7 +7115,7 @@ void MemoryController::update_rw_schedulable_counts() {
         //if (refreshPerBank[trans->bankIndex].refreshing) continue;
         if (trans->bp_by_tout) continue;
         if (trans->transactionType == DATA_READ) {
-            rw_schedulable_read_cnt++;
+            if (!rcmd_bp_byrp) rw_schedulable_read_cnt++;
         } else if (trans->data_ready_cnt == (trans->burst_length + 1)) {
             rw_schedulable_write_cnt++;
         }
@@ -9650,7 +9650,6 @@ void MemoryController::traceRegister() {
     TRACE_ADD(trace_prefix + "DFI_WDATA_BL", 16);
     TRACE_ADD(trace_prefix + "DFI_RDATA_VALID", 1);
     TRACE_ADD(trace_prefix + "DFI_RDATA_TASK", 64);
-    TRACE_ADD(trace_prefix + "DFI_RDATA_RANK", 8);
 #if defined(WAVE_QUEUE_LEVEL)
     size_t trace_queue_level = std::min<size_t>(WAVE_QUEUE_LEVEL, TRANS_QUEUE_DEPTH);
     for (size_t i = 0; i < trace_queue_level; i++) {
@@ -9706,7 +9705,6 @@ void MemoryController::traceSample() {
     TRACE_LOG(trace_prefix + "DFI_WDATA_BL", trace_dfi_wdata_bl);
     TRACE_LOG(trace_prefix + "DFI_RDATA_VALID", trace_dfi_rdata_valid);
     TRACE_LOG(trace_prefix + "DFI_RDATA_TASK", trace_dfi_rdata_task);
-    TRACE_LOG(trace_prefix + "DFI_RDATA_RANK", trace_dfi_rdata_rank);
 #if defined(WAVE_QUEUE_LEVEL)
     size_t trace_queue_level = std::min<size_t>(WAVE_QUEUE_LEVEL, TRANS_QUEUE_DEPTH);
     for (size_t i = 0; i < trace_queue_level; i++) {
@@ -9744,10 +9742,9 @@ void MemoryController::traceSample() {
     trace_dfi_rdata_valid = false;
 }
 
-void MemoryController::traceDfiRdata(uint64_t task, unsigned rank) {
+void MemoryController::traceDfiRdata(uint64_t task) {
     trace_dfi_rdata_valid = true;
     trace_dfi_rdata_task = task;
-    trace_dfi_rdata_rank = rank;
 }
 
 bool MemoryController::push_req(Transaction * trans) {
