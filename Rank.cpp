@@ -348,6 +348,7 @@ void Rank::update() {
                 outgoingDataPacket = readReturnPacket[i].task;
                 mask_wcmd_flag     = readReturnPacket[i].mask_wcmd;
                 ps_flag            = readReturnPacket[i].ps;
+                memoryController->traceDfiRdata(outgoingDataPacket, id);
                 readReturnPacket.erase(readReturnPacket.begin() + i);
                 memoryController->receiveFromBus(outgoingDataPacket, mask_wcmd_flag, ps_flag);
                 break;
