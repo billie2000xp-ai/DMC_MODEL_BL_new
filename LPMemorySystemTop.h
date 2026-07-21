@@ -158,6 +158,18 @@ private:
     uint64_t top_rdata_task;
     unsigned top_rdata_remain;
     string trace_prefix;
+    bool trace_cmd_in_valid;
+    bool trace_cmd_in_accept;
+    uint32_t trace_cmd_in_type;
+    uint64_t trace_cmd_in_task;
+    uint64_t trace_cmd_in_address;
+    uint32_t trace_cmd_in_data_size;
+    uint32_t trace_cmd_in_burst_length;
+    unsigned trace_cmd_in_target_dmc;
+    uint32_t trace_cmd_in_bank_index;
+    uint64_t trace_cmd_in_row;
+    uint64_t trace_cmd_in_col;
+    bool trace_cmd_in_to_rmw;
     bool trace_wdata_in_valid;
     bool trace_wdata_in_accept;
     uint64_t trace_wdata_in_task;
