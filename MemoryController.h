@@ -255,7 +255,7 @@ public:
     bool push_req(Transaction * trans);
     void traceRegister();
     void traceSample();
-    void traceDfiRdata(uint64_t task, unsigned rank);
+    void traceDfiRdata(uint64_t task);
 
     //fields
     vector<Transaction *> transactionQueue;
@@ -536,7 +536,6 @@ private:
     uint32_t trace_dfi_wdata_bl;
     bool trace_dfi_rdata_valid;
     uint64_t trace_dfi_rdata_task;
-    unsigned trace_dfi_rdata_rank;
     TransactionCmd activate_cmd;
     bool core_concurr_en;
     uint8_t cmd_cycle;
