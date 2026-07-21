@@ -170,6 +170,7 @@ public:
     void faw_update();
     void page_timeout_policy();
     void update_rwgroup_state();
+    void update_rw_schedulable_counts();
     unsigned GetDmcAvailability() const;
     unsigned GetDmcWriteAvailability() const;
     void update_group_state();
@@ -252,6 +253,9 @@ public:
 //    Rmw *rmw;
     Inline_ECC *iecc;
     bool push_req(Transaction * trans);
+    void traceRegister();
+    void traceSample();
+    void traceDfiRdata(uint64_t task, unsigned rank);
 
     //fields
     vector<Transaction *> transactionQueue;
@@ -443,6 +447,8 @@ public:
     uint64_t rw_group_timeout_write_total;
     bool rw_sync_group_valid;
     uint8_t rw_sync_group;
+    bool rw_sync_in_write_group;
+    uint8_t rw_sync_ch_cmd_cnt;
     bool in_write_group;
     uint8_t rk_grp_state;
     uint8_t real_rk_grp_state;
@@ -506,6 +512,31 @@ private:
     deque<uint64_t> rdata_ready_tasks;
     deque<data_packet>rp_fifo;
     bool rcmd_bp_byrp;
+    string trace_prefix;
+    bool trace_cmd_in_valid;
+    bool trace_cmd_in_accept;
+    TransactionType trace_cmd_in_type;
+    uint64_t trace_cmd_in_task;
+    uint64_t trace_cmd_in_address;
+    uint32_t trace_cmd_in_data_size;
+    uint32_t trace_cmd_in_burst_length;
+    uint32_t trace_cmd_in_bank_index;
+    uint64_t trace_cmd_in_row;
+    bool trace_wdata_in_valid;
+    uint64_t trace_wdata_in_task;
+    bool trace_dfi_cmd_fire;
+    TransactionCmd trace_dfi_cmd_type;
+    uint64_t trace_dfi_cmd_task;
+    uint32_t trace_dfi_cmd_bank_index;
+    uint64_t trace_dfi_cmd_row;
+    uint64_t trace_dfi_cmd_addr_col;
+    uint32_t trace_dfi_cmd_bl;
+    bool trace_dfi_wdata_valid;
+    uint64_t trace_dfi_wdata_task;
+    uint32_t trace_dfi_wdata_bl;
+    bool trace_dfi_rdata_valid;
+    uint64_t trace_dfi_rdata_task;
+    unsigned trace_dfi_rdata_rank;
     TransactionCmd activate_cmd;
     bool core_concurr_en;
     uint8_t cmd_cycle;
