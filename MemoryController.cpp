@@ -1458,14 +1458,7 @@ void MemoryController::fresh_timing(const BusPacket &bus_packet,bool hit) {
     for (auto &state : bankStates) {
         if (state.state->rwIntlvCountdown > 0) rw_intlv_cnt ++;
     }
-    unsigned trp_pb = bus_packet.fg_ref ? tRPfg : tRPpb;
-    if (row == 0xFFFF) {
-        fg_hit_count[bank]++;
-        if (fg_hit_count[bank] >= FG_REFRESH_TH_BANK) {
-            trp_pb = tRPfg;
-            fg_hit_count[bank] = 0;
-        }
-    }
+    unsigned trp_pb = bus_packet.fg_ref ? tRPfg + tRPpb : tRPpb;
     switch (bus_packet.type) {
         case READ_CMD :
         case READ_P_CMD :{     //todo: revise for e-mode
@@ -3446,7 +3439,7 @@ void MemoryController::state_fresh() {
                         // fix ,if the state of transaction is precharging ,it must be hold until idle
                         state.state->currentBankState = Precharging;
                         state.state->lastCommand = PRECHARGE_PB_CMD;
-                        state.state->stateChangeCountdown = state.state->fg_ref ? tRPfg : tRPpb;
+                        state.state->stateChangeCountdown = state.state->fg_ref ? tRPfg + tRPpb : tRPpb;
                         if (DEBUG_BUS) {
                             PRINTN(setw(10)<<now()<<" -- CHANGE :: READ/WRITE/WRITE_MASK_P_CMD, rank="
                                     <<state.rank<<", bank="<<state.bankIndex<<endl);
@@ -3559,7 +3552,7 @@ void MemoryController::refresh(unsigned sc) {
     // else pop from command queue if it's not empty
     bool combo_emode_unable = EM_ENABLE && (EM_MODE==2) && (sc==1); 
     if (IS_GD2) {
-        if (PBR_EN && arb_enable) gd2_dist_refresh();
+        if (PBR_EN && sc == 0) gd2_dist_refresh();
         return;
     } else if (AREF_EN || PBR_EN) { // other spec
         if (DMC_V590 && SBR_IDLE_ADAPT_EN) {
@@ -3693,22 +3686,20 @@ void MemoryController::gd2_dist_refresh() {
         for (size_t j = 0; j < NUM_BANKS; j ++) {
             unsigned bank = i * NUM_BANKS + j;
             for (size_t k = 0; k < NUM_MATGRPS; k ++) {
-                if (DistRefState[bank].pre_cmd_cnt[k] == PRE_NUM_SEND_PBR) {
-                    DistRefState[bank].pre_cmd_cnt[k] = 0;
-                    DistRefState[bank].dist_pstpnd_num[k] ++;
-                }
-                if (DistRefState[bank].dist_pstpnd_num[k] > 8) {
-                    ERROR(setw(10)<<now()<<" -- DMC["<<channel<<"] DistRef Postponed exceed, bank="
-                            <<bank<<", matgrp="<<k<<", cnt="<<DistRefState[bank].dist_pstpnd_num[k]);
-                    assert(0);
+                if (ACT_NUM_SEND_PBR > 0 &&
+                        DistRefState[bank].act_cmd_cnt[k] >= ACT_NUM_SEND_PBR &&
+                        DistRefState[bank].dist_pstpnd_num[k] == 0) {
+                    DistRefState[bank].dist_pstpnd_num[k] = 1;
                 }
             }
 
+            DistRefState[bank].force_dist_refresh = false;
             for (size_t k = 0; k < NUM_MATGRPS; k ++) {
-                DistRefState[bank].force_dist_refresh = false;
-                if (DistRefState[bank].dist_pstpnd_num[k] < PBR_PSTPND_LEVEL) continue;
-                DistRefState[bank].force_dist_refresh = true;
-                break;
+                if (ACT_NUM_SEND_PBR > 0 && DistRefState[bank].act_cmd_cnt[k] >=
+                        ACT_NUM_SEND_PBR + DSTREF_POSTPONE_ACT_MAT) {
+                    DistRefState[bank].force_dist_refresh = true;
+                    break;
+                }
             }
 
             bool has_matgrp_distref = false;
@@ -3722,40 +3713,45 @@ void MemoryController::gd2_dist_refresh() {
                 }
             }
 
-            // ========== 新增 bank 级处理（添加在原有逻辑之后） ==========
-            // 处理 bank 级预充电次数累积
-            if (DistRefState[bank].pre_cmd_cnt_bank >= PRE_NUM_SEND_PBR_BANK) {
-                DistRefState[bank].pre_cmd_cnt_bank = 0;
-                DistRefState[bank].dist_pstpnd_num_bank ++;
-            }
-            if (DistRefState[bank].dist_pstpnd_num_bank > 8) { 
-                // ERROR(setw(10)<<now()<<" -- DMC["<<channel<<"] Bank DistRef Postponed exceed, bank="
-                //         <<bank<<", cnt="<<DistRefState[bank].dist_pstpnd_num_bank);
-                // assert(0);
+            if (ACT_NUM_SEND_PBR_BANK > 0 &&
+                    DistRefState[bank].act_cmd_cnt_bank >= ACT_NUM_SEND_PBR_BANK &&
+                    DistRefState[bank].dist_pstpnd_num_bank == 0) {
+                DistRefState[bank].dist_pstpnd_num_bank = 1;
             }
 
-            // 设置 bank 级强制刷新标志
-            DistRefState[bank].force_dist_refresh_bank = false;
-            // if (DistRefState[bank].dist_pstpnd_num_bank >= PBR_PSTPND_LEVEL) {
-            //     DistRefState[bank].force_dist_refresh_bank = true;
-            // }
-            bool bank_distref_ready = false;
-            if (DistRefState[bank].dist_pstpnd_num_bank > 0) {
-                bank_distref_ready = true;
+            DistRefState[bank].force_dist_refresh_bank = ACT_NUM_SEND_PBR_BANK > 0 &&
+                    DistRefState[bank].act_cmd_cnt_bank >=
+                    ACT_NUM_SEND_PBR_BANK + DSTREF_POSTPONE_ACT_BANK;
+            bool bank_distref_ready = DistRefState[bank].dist_pstpnd_num_bank > 0;
+
+            if ((DistRefState[bank].force_dist_refresh || DistRefState[bank].force_dist_refresh_bank) &&
+                    DistRefState[bank].state == DIST_IDLE &&
+                    bankStates[bank].state->currentBankState == RowActive) {
+                if (arb_enable && (now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[i].size() < 4) {
+                    Cmd *c = new Cmd;
+                    c->state = working;
+                    c->cmd_type = PRECHARGE_PB_CMD;
+                    c->bank = bankStates[bank].bank;
+                    c->rank = bankStates[bank].rank;
+                    c->group = bankStates[bank].group;
+                    c->bankIndex = bankStates[bank].bankIndex;
+                    c->row = bankStates[bank].state->openRowAddress;
+                    c->cmd_source = 2;
+                    c->task = 0xFFFFFFFFFFFFFFE;
+                    CmdQueue.push_back(c);
+                }
+                continue;
             }
 
-            // ========== 原有 bank 状态检查（完全保留） ==========
-            if (bankStates[bank].state->currentBankState != Idle &&
+            if (DistRefState[bank].state == DIST_IDLE &&
+                    bankStates[bank].state->currentBankState != Idle) continue;
+            if (DistRefState[bank].state == DIST_IDLE && !DistRefState[bank].force_dist_refresh &&
+                    !DistRefState[bank].force_dist_refresh_bank && bank_cnt[bank] > 0 &&
                     bankStates[bank].state->currentBankState != Refreshing) continue;
-            if (!DistRefState[bank].force_dist_refresh && bank_cnt[bank] > 0 &&
-                    bankStates[bank].state->currentBankState != Refreshing) continue;
-            // if (!DistRefState[bank].force_dist_refresh_bank && bank_cnt[bank] > 0 &&
-            //         bankStates[bank].state->currentBankState != Refreshing) continue;
             if (bankStates[bank].state->act_executing) continue;
             if (SEND_DSTREF_SERIAL && has_bank_distref && distref_bank != bank) continue;
 
-            // ========== 优先级判断：有 matgrp 触发则处理 matgrp，否则处理 bank ==========
-            if (has_matgrp_distref || bank_distref_ready) {
+            if (has_matgrp_distref || bank_distref_ready || DistRefState[bank].state != DIST_IDLE) {
                 unsigned rank = bank / NUM_BANKS;
                 funcState[rank].wakeup = true;
                 if (RankState[rank].lp_state != IDLE) continue;
@@ -3763,11 +3759,13 @@ void MemoryController::gd2_dist_refresh() {
                 switch (DistRefState[bank].state) {
                     case DIST_IDLE : {
                         DistRefState[bank].state = SEND_ACT1;
-                        is_mat_distref[bank] = has_matgrp_distref;
+                        DistRefState[bank].selected_is_mat = has_matgrp_distref &&
+                                !DistRefState[bank].force_dist_refresh_bank;
+                        DistRefState[bank].selected_matgrp = matgrp_distref;
                         break;
                     }
                     case SEND_ACT1 : {
-                        if ((now() + 1) >= bankStates[bank].state->nextActivate1) {
+                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextActivate1) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = ACTIVATE1_DST_CMD;
@@ -3775,8 +3773,8 @@ void MemoryController::gd2_dist_refresh() {
                             c->rank = bankStates[bank].rank;
                             c->group = bankStates[bank].group;
                             c->bankIndex = bankStates[bank].bankIndex;
-                            if (is_mat_distref[bank]) {
-                                c->row = matgrp_distref;
+                            if (DistRefState[bank].selected_is_mat) {
+                                c->row = DistRefState[bank].selected_matgrp;
                             } else {
                                 c->row = 0xFFFF;
                             }
@@ -3787,7 +3785,7 @@ void MemoryController::gd2_dist_refresh() {
                         break;
                     }
                     case SEND_ACT2 : {
-                        if ((now() + 1) >= bankStates[bank].state->nextActivate2 && tFAWCountdown[rank].size() < 4) {
+                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextActivate2 && tFAWCountdown[rank].size() < 4) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = ACTIVATE2_DST_CMD;
@@ -3795,8 +3793,8 @@ void MemoryController::gd2_dist_refresh() {
                             c->rank = bankStates[bank].rank;
                             c->group = bankStates[bank].group;
                             c->bankIndex = bankStates[bank].bankIndex;
-                            if (is_mat_distref[bank]) {
-                                c->row = matgrp_distref;
+                            if (DistRefState[bank].selected_is_mat) {
+                                c->row = DistRefState[bank].selected_matgrp;
                             } else {
                                 c->row = 0xFFFF;
                             }
@@ -3807,7 +3805,7 @@ void MemoryController::gd2_dist_refresh() {
                         break;
                     }
                     case SEND_PRE : {
-                        if ((now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[rank].size() < 4) {
+                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[rank].size() < 4) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = PRECHARGE_PB_DST_CMD;
@@ -3815,15 +3813,18 @@ void MemoryController::gd2_dist_refresh() {
                             c->rank = bankStates[bank].rank;
                             c->group = bankStates[bank].group;
                             c->bankIndex = bankStates[bank].bankIndex;
-                            if (is_mat_distref[bank]) {
-                                c->row = matgrp_distref;
+                            if (DistRefState[bank].selected_is_mat) {
+                                c->row = DistRefState[bank].selected_matgrp;
                             } else {
                                 c->row = 0xFFFF;
+                            }
+                            if (!DistRefState[bank].selected_is_mat && FG_REFRESH_TH_BANK > 0 &&
+                                    DistRefState[bank].bank_dist_refresh_cnt + 1 >= FG_REFRESH_TH_BANK) {
+                                c->fg_ref = true;
                             }
                             c->cmd_source = 2;
                             c->task = 0xFFFFFFFFFFFFFFE;
                             CmdQueue.push_back(c);
-                            is_mat_distref[bank] = false;
                         }
                         break;
                     }
@@ -5623,10 +5624,6 @@ void MemoryController::scheduler() {
             access_bank_delay[c->bankIndex].enable = false;
             access_bank_delay[c->bankIndex].cnt = 0;
             bank_cas_delay[c->bankIndex] = 0;
-            DistRefState[c->bankIndex].pre_cmd_cnt[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
             CheckFgRef(c, c->bankIndex, matgrp);
             bankStates[c->bankIndex].state->lastCommand = READ_P_CMD;
             bankStates[c->bankIndex].state->lastCmdSource = c->cmd_source;
@@ -5652,8 +5649,8 @@ void MemoryController::scheduler() {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: READ_P_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos<<" rank="<<c->rank
                         <<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row<<" trans_size="
                         <<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5663,8 +5660,8 @@ void MemoryController::scheduler() {
                 PRINTN(setw(10)<<now()<<" -- SCH :: READ_P_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos<<" rank="<<c->rank
                         <<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row<<" trans_size="
                         <<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5717,10 +5714,6 @@ void MemoryController::scheduler() {
             access_bank_delay[c->bankIndex].enable = false;
             access_bank_delay[c->bankIndex].cnt = 0;
             bank_cas_delay[c->bankIndex] = 0;
-            DistRefState[c->bankIndex].pre_cmd_cnt[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
             CheckFgRef(c, c->bankIndex, matgrp);
             bankStates[c->bankIndex].state->lastCommand = WRITE_P_CMD;
             bankStates[c->bankIndex].state->lastCmdSource = c->cmd_source;
@@ -5746,8 +5739,8 @@ void MemoryController::scheduler() {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: WRITE_P_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos<<" rank="<<c->rank
                         <<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row<<" trans_size="
                         <<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5757,8 +5750,8 @@ void MemoryController::scheduler() {
                 PRINTN(setw(10)<<now()<<" -- SCH :: WRITE_P_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos<<" rank="<<c->rank
                         <<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row<<" trans_size="
                         <<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5811,10 +5804,6 @@ void MemoryController::scheduler() {
             access_bank_delay[c->bankIndex].enable = false;
             access_bank_delay[c->bankIndex].cnt = 0;
             bank_cas_delay[c->bankIndex] = 0;
-            DistRefState[c->bankIndex].pre_cmd_cnt[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
             CheckFgRef(c, c->bankIndex, matgrp);
             bankStates[c->bankIndex].state->lastCommand = WRITE_MASK_P_CMD;
             bankStates[c->bankIndex].state->lastCmdSource = c->cmd_source;
@@ -5840,8 +5829,8 @@ void MemoryController::scheduler() {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: WRITE_MASK_P_CMD task="<<c->task<<" QoS="<<c->pri<<" rank="
                         <<c->rank<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row
                         <<" trans_size="<<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5851,8 +5840,8 @@ void MemoryController::scheduler() {
                 PRINTN(setw(10)<<now()<<" -- SCH :: WRITE_MASK_P_CMD task="<<c->task<<" QoS="<<c->pri<<" rank="
                         <<c->rank<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="<<c->row
                         <<" trans_size="<<c->trans_size<<" addr_col="<<c->addr_col<<" bl="<<c->bl<<" pre_cmd_cnt="
-                        <<+DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" pre_cmd_cnt_fg="
-                        <<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
+                        <<+DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" act_cmd_cnt_fg="
+                        <<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
                 }
@@ -5911,6 +5900,11 @@ void MemoryController::scheduler() {
 
             active_cnt++;
             active_cmd_cnt[c->bankIndex] ++;
+            if (IS_GD2) {
+                DistRefState[c->bankIndex].act_cmd_cnt[matgrp] ++;
+                DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp] ++;
+                DistRefState[c->bankIndex].act_cmd_cnt_bank ++;
+            }
             access_bank_delay[c->bankIndex].enable = false;
             access_bank_delay[c->bankIndex].cnt = 0;
             bankStates[c->bankIndex].state->lastCommand = ACTIVATE2_CMD;
@@ -6030,10 +6024,6 @@ void MemoryController::scheduler() {
             if (c->cmd_source == 0) rowconf_pre_cnt[c->bankIndex] ++;
             else if (c->cmd_source == 1) pageto_pre_cnt[c->bankIndex] ++;
             else func_pre_cnt[c->bankIndex] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
             CheckFgRef(c, c->bankIndex, matgrp);
             if (c->cmd_source == 2) {
                 refreshPerBank[c->bankIndex].refreshWaitingPre = true;
@@ -6052,8 +6042,8 @@ void MemoryController::scheduler() {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: PRECHARGE_PB_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos  
                         <<" rank="<<c->rank<<" sc="<<sub_channel<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="
                         <<c->row<<" matgrp="<<matgrp<<" POSTPND_PB="<<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]
                         <<" POSTPND_AB="<<refreshALL[c->rank][sub_channel].refresh_cnt);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6064,8 +6054,8 @@ void MemoryController::scheduler() {
                 PRINTN(setw(10)<<now()<<" -- SCH :: PRECHARGE_PB_CMD task="<<c->task<<" Pri="<<c->pri<<" Qos="<<c->qos 
                         <<" rank="<<c->rank<<" sc="<<sub_channel<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex<<" row="
                         <<c->row<<" matgrp="<<matgrp<<" POSTPND_PB="<<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]
                         <<" POSTPND_AB="<<refreshALL[c->rank][sub_channel].refresh_cnt);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6093,10 +6083,6 @@ void MemoryController::scheduler() {
                 bankStates[bank_tmp].state->lastCmdSource = c->cmd_source;
                 bankStates[bank_tmp].ser_rhit_cnt = 0;
                 if (state->currentBankState == RowActive) {
-                    DistRefState[bank_tmp].pre_cmd_cnt[state->lastRow % NUM_MATGRPS] ++;
-                    DistRefState[bank_tmp].pre_cmd_cnt_fg[state->lastRow % NUM_MATGRPS] ++;
-                    DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-                    DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
                     CheckFgRef(c, bank_tmp, state->lastRow % NUM_MATGRPS);
                 }
             }
@@ -6106,8 +6092,8 @@ void MemoryController::scheduler() {
             if (PRINT_SCH) {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: PRECHARGE_AB_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" sc="<<sub_channel<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]
                         <<" POSTPND="<<refreshALL[c->rank][sub_channel].refresh_cnt);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6117,8 +6103,8 @@ void MemoryController::scheduler() {
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- SCH :: PRECHARGE_AB_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" sc="<<sub_channel<<" sid="<<c->sid<<" group="<<c->group<< " bank="<<c->bankIndex
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]
                         <<" POSTPND="<<refreshALL[c->rank][sub_channel].refresh_cnt);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6263,13 +6249,13 @@ void MemoryController::scheduler() {
             if (PRINT_SCH) {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: ACTIVATE1_DST_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" group="<<c->group<< " bank="<<c->bankIndex<<" matgrp="<<matgrp
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" POSTPND="
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" POSTPND="
                         <<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]<<endl);
             }
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- SCH :: ACTIVATE1_DST_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" group="<<c->group<< " bank="<<c->bankIndex<<" matgrp="<<matgrp
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" POSTPND="
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" POSTPND="
                         <<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]<<endl);
             }
             break;
@@ -6284,7 +6270,7 @@ void MemoryController::scheduler() {
             if (PRINT_SCH) {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: ACTIVATE2_DST_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" group="<<c->group<< " bank="<<c->bankIndex<<" matgrp="<<matgrp
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" POSTPND="
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" POSTPND="
                         <<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6294,7 +6280,7 @@ void MemoryController::scheduler() {
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- SCH :: ACTIVATE2_DST_CMD task="<<c->task<<" QoS="<<c->pri
                         <<" rank="<<c->rank<<" group="<<c->group<< " bank="<<c->bankIndex<<" matgrp="<<matgrp
-                        <<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]<<" POSTPND="
+                        <<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]<<" POSTPND="
                         <<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6314,19 +6300,22 @@ void MemoryController::scheduler() {
             perbank_refresh_cnt[c->bankIndex] ++;
             if (c->row != 0xFFFF) {
                 DistRefState[c->bankIndex].dist_pstpnd_num[matgrp] --;
+                DistRefState[c->bankIndex].act_cmd_cnt[matgrp] = 0;
             } else {
                 DistRefState[c->bankIndex].dist_pstpnd_num_bank --;
+                DistRefState[c->bankIndex].act_cmd_cnt_bank = 0;
+                DistRefState[c->bankIndex].bank_dist_refresh_cnt ++;
+                if (FG_REFRESH_TH_BANK > 0 &&
+                        DistRefState[c->bankIndex].bank_dist_refresh_cnt >= FG_REFRESH_TH_BANK) {
+                    DistRefState[c->bankIndex].bank_dist_refresh_cnt = 0;
+                }
             }
-            DistRefState[c->bankIndex].pre_cmd_cnt[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp] ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_bank ++;
-            DistRefState[c->bankIndex].pre_cmd_cnt_fg_bank ++;
             DistRefState[c->bankIndex].state = DIST_IDLE;
-            CheckFgRef(c, c->bankIndex, matgrp);
+            DistRefState[c->bankIndex].selected_is_mat = false;
             if (PRINT_SCH) {
                 DEBUGN(setw(10)<<now()<<" -- SCH :: PRECHARGE_PB_DST_CMD task="<<c->task<<" bank="
-                        <<c->bankIndex<<" matgrp="<<matgrp<<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<c->bankIndex<<" matgrp="<<matgrp<<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref
                         <<" POSTPND="<<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     DEBUGN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6335,8 +6324,8 @@ void MemoryController::scheduler() {
             }
             if (DEBUG_BUS) {
                 PRINTN(setw(10)<<now()<<" -- SCH :: PRECHARGE_PB_DST_CMD task="<<c->task<<" bank="
-                        <<c->bankIndex<<" matgrp="<<matgrp<<" pre_cmd_cnt="<<DistRefState[c->bankIndex].pre_cmd_cnt[matgrp]
-                        <<" pre_cmd_cnt_fg="<<DistRefState[c->bankIndex].pre_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref
+                        <<c->bankIndex<<" matgrp="<<matgrp<<" act_cmd_cnt="<<DistRefState[c->bankIndex].act_cmd_cnt[matgrp]
+                        <<" act_cmd_cnt_fg="<<DistRefState[c->bankIndex].act_cmd_cnt_fg[matgrp]<<" fg_ref="<<c->fg_ref
                         <<" POSTPND="<<DistRefState[c->bankIndex].dist_pstpnd_num[matgrp]);
                 for (size_t i = 0; i < NUM_RANKS; i ++) {
                     PRINTN(" R"<<i<<"R="<<+r_rank_cnt[i]<<" R"<<i<<"W="<<+w_rank_cnt[i]);
@@ -6404,17 +6393,10 @@ void MemoryController::scheduler() {
 
 void MemoryController::CheckFgRef(Cmd *c, unsigned bank, unsigned matgrp) {
     if (!IS_GD2 || FG_REFRESH_TH == 0) return;
-    if (DistRefState[bank].pre_cmd_cnt_fg[matgrp] >= FG_REFRESH_TH) {
-        DistRefState[bank].pre_cmd_cnt_fg[matgrp] = 0;
+    if (DistRefState[bank].act_cmd_cnt_fg[matgrp] >= FG_REFRESH_TH) {
+        DistRefState[bank].act_cmd_cnt_fg[matgrp] = 0;
         c->fg_ref = true;
     }
-    // else {
-    //     // 新增 rmat 触发
-    //     if (DistRefState[bank].pre_cmd_cnt_fg_bank >= FG_REFRESH_TH_BANK) {
-    //         DistRefState[bank].pre_cmd_cnt_fg_bank = 0;
-    //         c->fg_ref = true;
-    //     }
-    // }
 }
 
 void MemoryController::faw_update() {
@@ -6575,8 +6557,8 @@ void MemoryController::update_state() {
                     <<adpt_openpage_time<<" | opc_cnt="<<opc_cnt<<" | ppc_cnt="<<ppc_cnt<<" | act_executing="<<state.state->act_executing);
         }
         for (size_t i = 0; i < NUM_MATGRPS; i ++) {
-            PRINTN(" | pre_cmd_cnt"<<i<<"="<<DistRefState[state.bankIndex].pre_cmd_cnt[i]);
-            PRINTN(" | pre_cmd_cnt_fg"<<i<<"="<<DistRefState[state.bankIndex].pre_cmd_cnt_fg[i]);
+            PRINTN(" | act_cmd_cnt"<<i<<"="<<DistRefState[state.bankIndex].act_cmd_cnt[i]);
+            PRINTN(" | act_cmd_cnt_fg"<<i<<"="<<DistRefState[state.bankIndex].act_cmd_cnt_fg[i]);
         }
         for (size_t i = 0; i < NUM_MATGRPS; i ++) {
             PRINTN(" | dist_pstpnd_num"<<i<<"="<<DistRefState[state.bankIndex].dist_pstpnd_num[i]);
@@ -7630,6 +7612,14 @@ void MemoryController::que_pipeline() {
                             <<+rk_grp_state<<endl);
                 }
                 break;
+            }
+        }
+    }
+
+    if (IS_GD2) {
+        for (size_t bank = 0; bank < NUM_RANKS * NUM_BANKS; bank ++) {
+            if (DistRefState[bank].force_dist_refresh || DistRefState[bank].force_dist_refresh_bank) {
+                bankStates[bank].hold_precharge = false;
             }
         }
     }
@@ -8989,12 +8979,6 @@ void MemoryController::lc(Transaction *t) {
             }
         }
     }
-    if ((DistRefState[t->bankIndex].force_dist_refresh || DistRefState[t->bankIndex].force_dist_refresh_bank) && t->issue_size == 0) {
-        if (DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- LC :: GD2 force disturb refresh bp, bank"<<t->bankIndex<<", task="<<t->task<<endl);
-        }
-        return;
-    }
     // todo: change for enahnced DBR?
     for (size_t rank = 0; rank < NUM_RANKS; rank ++) {
         if (force_pbr_refresh[rank][sub_channel] && SBR_REQ_MODE == 1 && t->issue_size == 0) {
@@ -9058,6 +9042,14 @@ void MemoryController::lc(Transaction *t) {
     }
 
     need_issue(t);
+
+    if ((DistRefState[t->bankIndex].force_dist_refresh || DistRefState[t->bankIndex].force_dist_refresh_bank) &&
+            t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD) {
+        if (DEBUG_BUS) {
+            PRINTN(setw(10)<<now()<<" -- LC :: GD2 force disturb refresh bp, bank"<<t->bankIndex<<", task="<<t->task<<endl);
+        }
+        return;
+    }
 
     if (t->nextCmd == PRECHARGE_PB_CMD && t->timeout && t->issue_size == 0 && !t->act_executing) {
         for (auto &other : transactionQueue) {
