@@ -99,28 +99,31 @@ public:
         DIST_STATE state;
         DIST_STATE bank_state;
         unsigned bank;
-        vector <uint32_t> pre_cmd_cnt;
+        vector <uint32_t> act_cmd_cnt;
         vector <uint32_t> dist_pstpnd_num;
-        vector<uint32_t> pre_cmd_cnt_fg;
+        vector<uint32_t> act_cmd_cnt_fg;
         bool force_dist_refresh;
-        // 新增 bank 级
-        uint32_t pre_cmd_cnt_bank;          // bank 总预充电次数
-        uint32_t pre_cmd_cnt_fg_bank;       // bank 总 fg 预充电次数（可选）
-        uint32_t dist_pstpnd_num_bank;      // bank 级推迟刷新计数
-        bool force_dist_refresh_bank;       // 强制全 bank 刷新标志
+        uint32_t act_cmd_cnt_bank;
+        uint32_t dist_pstpnd_num_bank;
+        uint32_t bank_dist_refresh_cnt;
+        bool force_dist_refresh_bank;
+        bool selected_is_mat;
+        uint32_t selected_matgrp;
         GD2_DIST_STATE (size_t index) {
             state = DIST_IDLE;
             bank = index;
             for (size_t i = 0; i < NUM_MATGRPS; i ++) {
-                pre_cmd_cnt.push_back(0);
+                act_cmd_cnt.push_back(0);
                 dist_pstpnd_num.push_back(0);
-                pre_cmd_cnt_fg.push_back(0);
+                act_cmd_cnt_fg.push_back(0);
             }
             force_dist_refresh = false;
-            pre_cmd_cnt_bank = 0;
-            pre_cmd_cnt_fg_bank = 0;
+            act_cmd_cnt_bank = 0;
             dist_pstpnd_num_bank = 0;
+            bank_dist_refresh_cnt = 0;
             force_dist_refresh_bank = false;
+            selected_is_mat = false;
+            selected_matgrp = 0;
         }
     };
     vector <GD2_DIST_STATE> DistRefState;
