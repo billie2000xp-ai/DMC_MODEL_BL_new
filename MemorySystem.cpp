@@ -1584,6 +1584,57 @@ STATE_PRINTN("-------------------- Rank LP Time Statistics (DFI Clock) ---------
         }
         STATE_PRINTN(endl);
     }
+    auto print_variance = [&](const string &name, const vector<uint32_t> &read,
+            const vector<uint32_t> &write, const vector<uint32_t> &total) {
+        double read_mean = 0;
+        double write_mean = 0;
+        double total_mean = 0;
+        for (size_t i = 0; i < total.size(); i ++) {
+            read_mean += read[i];
+            write_mean += write[i];
+            total_mean += total[i];
+        }
+        read_mean /= total.size();
+        write_mean /= total.size();
+        total_mean /= total.size();
+        double read_variance = 0;
+        double write_variance = 0;
+        double total_variance = 0;
+        for (size_t i = 0; i < total.size(); i ++) {
+            read_variance += (read[i] - read_mean) * (read[i] - read_mean);
+            write_variance += (write[i] - write_mean) * (write[i] - write_mean);
+            total_variance += (total[i] - total_mean) * (total[i] - total_mean);
+        }
+        STATE_PRINTN(name<<" variance read : "<<fixed<<setprecision(3)<<read_variance / total.size()
+                <<" | write : "<<write_variance / total.size()<<" | total : "
+                <<total_variance / total.size()<<defaultfloat<<" |"<<endl);
+    };
+    print_variance("Bank", memoryController->racc_bank_cnt, memoryController->wacc_bank_cnt,
+            memoryController->acc_bank_cnt);
+    if (IS_GD2) {
+        STATE_PRINTN("-------------------- Bank Group Command Number ----------------------------------------\n");
+        for (size_t rank = 0; rank < NUM_RANKS; rank ++) {
+            for (size_t group = 0; group < NUM_GROUPS; group ++) {
+                STATE_PRINTN("Rank"<<rank<<" BG"<<setw(2)<<group<<" read : "<<setw(6)
+                        <<memoryController->racc_bg_cnt[rank][group]<<" | write : "<<setw(6)
+                        <<memoryController->wacc_bg_cnt[rank][group]<<" | total : "<<setw(6)
+                        <<memoryController->acc_bg_cnt[rank][group]<<" |"<<endl);
+            }
+            print_variance("Rank" + to_string(rank) + " BG", memoryController->racc_bg_cnt[rank],
+                    memoryController->wacc_bg_cnt[rank], memoryController->acc_bg_cnt[rank]);
+        }
+        STATE_PRINTN("-------------------- Mat Command Number -----------------------------------------------\n");
+        for (size_t rank = 0; rank < NUM_RANKS; rank ++) {
+            for (size_t mat = 0; mat < NUM_MATGRPS; mat ++) {
+                STATE_PRINTN("Rank"<<rank<<" Mat"<<setw(2)<<mat<<" read : "<<setw(6)
+                        <<memoryController->racc_mat_cnt[rank][mat]<<" | write : "<<setw(6)
+                        <<memoryController->wacc_mat_cnt[rank][mat]<<" | total : "<<setw(6)
+                        <<memoryController->acc_mat_cnt[rank][mat]<<" |"<<endl);
+            }
+            print_variance("Rank" + to_string(rank) + " Mat", memoryController->racc_mat_cnt[rank],
+                    memoryController->wacc_mat_cnt[rank], memoryController->acc_mat_cnt[rank]);
+        }
+    }
     STATE_PRINTN("-------------------- Row Conflict Precharge Count (Counter) ---------------------------\n");
     for (size_t bank = 0; bank < NUM_RANKS * NUM_BANKS; bank ++) {
         STATE_PRINTN("Bank"<<setw(2)<<bank<<" "<<setw(13)<<"RowConfPre");
