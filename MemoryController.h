@@ -339,10 +339,16 @@ public:
     vector<uint32_t> bank_cas_delay;
     vector<uint32_t> acc_rank_cnt;
     vector<uint32_t> acc_bank_cnt;
+    vector<vector<uint32_t>> acc_bg_cnt;
+    vector<vector<uint32_t>> acc_mat_cnt;
     vector<uint32_t> racc_rank_cnt;
     vector<uint32_t> racc_bank_cnt;
+    vector<vector<uint32_t>> racc_bg_cnt;
+    vector<vector<uint32_t>> racc_mat_cnt;
     vector<uint32_t> wacc_rank_cnt;
     vector<uint32_t> wacc_bank_cnt;
+    vector<vector<uint32_t>> wacc_bg_cnt;
+    vector<vector<uint32_t>> wacc_mat_cnt;
     vector<uint32_t> active_cmd_cnt;
     vector<uint32_t> page_cmd_cnt;
     vector<uint32_t> page_timeout_rd;
