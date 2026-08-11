@@ -143,14 +143,20 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     acc_rank_cnt.reserve(NUM_RANKS);
     acc_bank_cnt.clear();
     acc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
+    acc_bg_cnt.clear();
+    acc_mat_cnt.clear();
     racc_rank_cnt.clear();
     racc_rank_cnt.reserve(NUM_RANKS);
     racc_bank_cnt.clear();
     racc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
+    racc_bg_cnt.clear();
+    racc_mat_cnt.clear();
     wacc_rank_cnt.clear();
     wacc_rank_cnt.reserve(NUM_RANKS);
     wacc_bank_cnt.clear();
     wacc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
+    wacc_bg_cnt.clear();
+    wacc_mat_cnt.clear();
     r_bank_cnt.clear();
     r_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
     w_bank_cnt.clear();
@@ -468,6 +474,12 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
         r_bg_cnt.push_back(vector<unsigned>());
         w_bg_cnt.push_back(vector<unsigned>());
         bg_cnt.push_back(vector<unsigned>());
+        racc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
+        wacc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
+        acc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
+        racc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
+        wacc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
+        acc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
         r_sid_cnt.push_back(vector<unsigned>());
         w_sid_cnt.push_back(vector<unsigned>());
         sid_cnt.push_back(vector<unsigned>());
@@ -9892,6 +9904,8 @@ bool MemoryController::addTransaction(Transaction *trans) {
         sid_cnt[trans->rank][trans->sid] ++;
         acc_rank_cnt[trans->rank] ++;
         acc_bank_cnt[trans->bankIndex] ++;
+        acc_bg_cnt[trans->rank][trans->group] ++;
+        if (IS_GD2) acc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
 
         if (MPAM_PUSH_EN) pushQosForSameMpamTrans(trans);
         if (MID_PUSH_EN) pushQosForSameMidTrans(trans);
@@ -9940,6 +9954,8 @@ bool MemoryController::addTransaction(Transaction *trans) {
             r_qos_cnt[trans->qos] ++;
             racc_rank_cnt[trans->rank] ++;
             racc_bank_cnt[trans->bankIndex] ++;
+            racc_bg_cnt[trans->rank][trans->group] ++;
+            if (IS_GD2) racc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
             TotalDmcRdBytes += trans->data_size;
             if (trans->data_size == 32) TotalDmcRd32B ++;
             else if (trans->data_size == 64) TotalDmcRd64B ++;
@@ -9974,6 +9990,8 @@ bool MemoryController::addTransaction(Transaction *trans) {
 //            DEBUG(" total write cnt="<<totalWrites);
             wacc_rank_cnt[trans->rank] ++;
             wacc_bank_cnt[trans->bankIndex] ++;
+            wacc_bg_cnt[trans->rank][trans->group] ++;
+            if (IS_GD2) wacc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
             TotalDmcWrBytes += trans->data_size;
             if (trans->data_size == 32) TotalDmcWr32B ++;
             else if (trans->data_size == 64) TotalDmcWr64B ++;
