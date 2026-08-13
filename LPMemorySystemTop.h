@@ -77,6 +77,7 @@ public:
 
     //output file
     ofstream DDRSim_log;
+    ofstream rw_state_log;
     uint32_t curr_index;
     uint32_t pre_index;
     vector<uint32_t> clock_que;
@@ -110,6 +111,7 @@ private:
     unsigned rw_sync_act_cmd_num;
     vector<MemoryController::RwGroupSnapshot> rw_sync_prev_snapshot;
     void update_rw_sync_group();
+    void print_rw_state();
     class DmcCallbackProxy {
     public:
         DmcCallbackProxy(LPMemorySystemTop *parent_, unsigned dmc_id_);
