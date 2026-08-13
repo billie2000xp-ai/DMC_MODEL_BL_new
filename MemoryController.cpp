@@ -7279,6 +7279,11 @@ uint8_t MemoryController::GetEffectiveRwGroup() const {
     return rw_sync_group_valid ? rw_sync_group : rw_group_state[0];
 }
 
+uint8_t MemoryController::GetExecutionRwState() const {
+    if (GetEffectiveRwGroup() == NO_GROUP) return NO_GROUP;
+    return in_write_group ? WRITE_GROUP : READ_GROUP;
+}
+
 MemoryController::RwGroupSnapshot MemoryController::GetRwGroupSnapshot() const {
     RwGroupSnapshot snapshot;
     snapshot.read_cnt = que_read_cnt;
