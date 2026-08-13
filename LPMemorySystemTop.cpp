@@ -347,8 +347,10 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     RPFIFO_DEPTH = cfg->getNumber("RPFIFO_DEPTH");
     RPFIFO_AMFULL_TH = cfg->getNumber("RPFIFO_AMFULL_TH");
     DMC_DB_TRANS_EN = cfg->getBool("DMC_DB_TRANS_EN");
-    PRE_NUM_SEND_PBR_BANK = cfg->getNumber("PRE_NUM_SEND_PBR_BANK");
+    ACT_NUM_SEND_PBR_BANK = cfg->getNumber("ACT_NUM_SEND_PBR_BANK");
     FG_REFRESH_TH_BANK = cfg->getNumber("FG_REFRESH_TH_BANK");
+    DSTREF_POSTPONE_ACT_MAT = cfg->getNumber("DSTREF_POSTPONE_ACT_MAT");
+    DSTREF_POSTPONE_ACT_BANK = cfg->getNumber("DSTREF_POSTPONE_ACT_BANK");
     ECC_WB_EN = cfg->getBool("ECC_WB_EN");
     ECC_WB_MODE = cfg->getNumber("ECC_WB_MODE");
     ECC_WB_TH = cfg->getNumber("ECC_WB_TH");
@@ -649,8 +651,10 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     GET_PARAM(RPFIFO_DEPTH, "RPFIFO_DEPTH", getUint);
     GET_PARAM(RPFIFO_AMFULL_TH, "RPFIFO_AMFULL_TH", getUint);
     GET_PARAM(DMC_DB_TRANS_EN, "DMC_DB_TRANS_EN", getBool);
-    GET_PARAM(PRE_NUM_SEND_PBR_BANK, "PRE_NUM_SEND_PBR_BANK", getUint);
+    GET_PARAM(ACT_NUM_SEND_PBR_BANK, "ACT_NUM_SEND_PBR_BANK", getUint);
     GET_PARAM(FG_REFRESH_TH_BANK, "FG_REFRESH_TH_BANK", getUint);
+    GET_PARAM(DSTREF_POSTPONE_ACT_MAT, "DSTREF_POSTPONE_ACT_MAT", getUint);
+    GET_PARAM(DSTREF_POSTPONE_ACT_BANK, "DSTREF_POSTPONE_ACT_BANK", getUint);
     GET_PARAM(ECC_WB_EN, "ECC_WB_EN", getBool);
     GET_PARAM(ECC_WB_MODE, "ECC_WB_MODE", getUint);
     GET_PARAM(ECC_WB_TH, "ECC_WB_TH", getUint);
@@ -759,7 +763,7 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     GET_PARAM(tASREFE, "tASREFE", getUint);
     GET_PARAM(ABR_PSTPND_LEVEL, "ABR_PSTPND_LEVEL", getUint);
     GET_PARAM(PBR_PSTPND_LEVEL, "PBR_PSTPND_LEVEL", getUint);
-    GET_PARAM(PRE_NUM_SEND_PBR, "PRE_NUM_SEND_PBR", getUint);
+    GET_PARAM(ACT_NUM_SEND_PBR, "ACT_NUM_SEND_PBR", getUint);
     GET_PARAM(POWER_RDINC_K, "POWER_RDINC_K", getFloat);
     GET_PARAM(POWER_RDWRAP_K, "POWER_RDWRAP_K", getFloat);
     GET_PARAM(POWER_WRINC_K, "POWER_WRINC_K", getFloat);
@@ -941,6 +945,15 @@ LPMemorySystemTop::LPMemorySystemTop(unsigned hhaId, string IniFilePath, string 
     }
     IniReader::CheckParameter();
 
+    if (DEBUG_STATE) {
+        string rw_log = LogPath + "/lpddr_rw_state" + std::to_string(hhaId) + ".log";
+        rw_state_log.open(rw_log.c_str(), ios_base::out | ios_base::trunc);
+        if (!rw_state_log) {
+            ERROR("Cannot open "<<rw_log);
+            assert(0);
+        }
+    }
+
     for (size_t dmcId=0; dmcId<NUM_CHANS; dmcId++) {
         MemorySystem *channel = new MemorySystem(dmcId, hhaId, DDRSim_log ,LogPath);
         channels.push_back(channel);
@@ -1100,6 +1113,11 @@ LPMemorySystemTop::~LPMemorySystemTop() {
     proxy_read_done_cbs.clear();
     proxy_cmd_cbs.clear();
     dmc_callback_proxies.clear();
+
+    if (rw_state_log.is_open()) {
+        rw_state_log.flush();
+        rw_state_log.close();
+    }
 
     // flush our streams and close them up
 #ifdef LOG_OUTPUT
@@ -1292,6 +1310,7 @@ void LPMemorySystemTop::update() {
     for (size_t i = 0; i < NUM_CHANS; i++) {
         channels[i]->update();
     }
+    print_rw_state();
 
     if (RMW_ENABLE || WCMD_MERGE_EN) {
         for (auto rmw_inst : rmws) {
@@ -1398,6 +1417,21 @@ void LPMemorySystemTop::update() {
         }
     }
     traceSample();
+}
+
+void LPMemorySystemTop::print_rw_state() {
+    if (!DEBUG_STATE || now() < DEBUG_START_TIME || now() > DEBUG_END_TIME) return;
+    rw_state_log << now();
+    for (size_t i = 0; i < NUM_CHANS; i++) {
+        MemoryController *controller = channels[i]->memoryController;
+        uint8_t state = controller->GetExecutionRwState();
+        const char *state_name = state == READ_GROUP ? "R" :
+                state == WRITE_GROUP ? "W" : "N";
+        rw_state_log << " DMC" << i << "=" << state_name
+                << " group=" << +controller->GetEffectiveRwGroup()
+                << " in_write_group=" << controller->IsInWriteGroup();
+    }
+    rw_state_log << endl;
 }
 
 void LPMemorySystemTop::traceRegister() {
