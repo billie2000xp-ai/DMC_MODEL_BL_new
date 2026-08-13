@@ -212,6 +212,8 @@ public:
     unsigned SchedulableReadCnt() const {return rw_schedulable_read_cnt;};
     unsigned SchedulableWriteCnt() const {return rw_schedulable_write_cnt;};
     uint8_t GetLocalRwGroup() const {return rw_group_state[0];};
+    uint8_t GetExecutionRwState() const;
+    bool IsInWriteGroup() const {return in_write_group;};
     RwGroupSnapshot GetRwGroupSnapshot() const;
     uint8_t GetEffectiveRwGroup() const;
     void SetRwSyncGroup(uint8_t group);
