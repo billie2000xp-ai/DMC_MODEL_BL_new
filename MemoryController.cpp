@@ -143,20 +143,14 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
     acc_rank_cnt.reserve(NUM_RANKS);
     acc_bank_cnt.clear();
     acc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
-    acc_bg_cnt.clear();
-    acc_mat_cnt.clear();
     racc_rank_cnt.clear();
     racc_rank_cnt.reserve(NUM_RANKS);
     racc_bank_cnt.clear();
     racc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
-    racc_bg_cnt.clear();
-    racc_mat_cnt.clear();
     wacc_rank_cnt.clear();
     wacc_rank_cnt.reserve(NUM_RANKS);
     wacc_bank_cnt.clear();
     wacc_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
-    wacc_bg_cnt.clear();
-    wacc_mat_cnt.clear();
     r_bank_cnt.clear();
     r_bank_cnt.reserve(NUM_BANKS * NUM_RANKS);
     w_bank_cnt.clear();
@@ -474,12 +468,6 @@ MemoryController::MemoryController(MemorySystem *parent, ostream &DDRSim_log_,
         r_bg_cnt.push_back(vector<unsigned>());
         w_bg_cnt.push_back(vector<unsigned>());
         bg_cnt.push_back(vector<unsigned>());
-        racc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
-        wacc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
-        acc_bg_cnt.push_back(vector<unsigned>(NUM_GROUPS, 0));
-        racc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
-        wacc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
-        acc_mat_cnt.push_back(vector<unsigned>(NUM_MATGRPS, 0));
         r_sid_cnt.push_back(vector<unsigned>());
         w_sid_cnt.push_back(vector<unsigned>());
         sid_cnt.push_back(vector<unsigned>());
@@ -1067,17 +1055,52 @@ void MemoryController::Cmd2Dfi_statistics(uint64_t task, uint64_t timeAdded, uns
 void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, unsigned qos,
         unsigned mid, unsigned pf_type, unsigned rank, bool wb_flag) {
 
-    // 此时的 delay 已经包含了 data_fresh 中物理注入的 tWB_DLY 惩罚时间
-    uint32_t delay = (now() - timeAdded); 
-    
-    // 顶部拦截：Mode 1 的最终“回读”完成
+    auto schedule_ecc = [&](TransactionType type) {
+        auto it = pending_TransactionQue.find(task);
+        if (it == pending_TransactionQue.end()) return;
+        const TRANS_MSG &msg = it->second;
+        Transaction *trans = new Transaction;
+        trans->transactionType = type;
+        trans->address = msg.address;
+        trans->channel = msg.channel;
+        trans->rank = msg.rank;
+        trans->bank = msg.bank;
+        trans->bankIndex = msg.bankIndex;
+        trans->row = msg.row;
+        trans->col = msg.col;
+        trans->addr_col = msg.addr_col;
+        trans->group = msg.group;
+        trans->sid = msg.sid;
+        trans->data_size = msg.data_size;
+        trans->burst_length = msg.burst_length;
+        trans->qos = msg.qos;
+        trans->mid = msg.mid;
+        trans->pf_type = msg.pf_type;
+        trans->sub_pftype = msg.sub_pftype;
+        trans->sub_src = msg.sub_src;
+        trans->task = task;
+        trans->wb = true;
+        ecc_wb_queue.push_back(trans);
+        if (DEBUG_BUS) {
+            PRINTN(setw(10)<<now()<<" -- ECC WB: Scheduled "
+                    <<(type == DATA_READ ? "READ-BACK" : "WRITE")<<", task="<<task<<endl);
+        }
+    };
+
     if (wb_flag) {
+        ecc_checked_tasks.erase(task);
+        task_ecc_release_time.erase(task);
+        tasks_need_ecc_wb.erase(task);
         if (DEBUG_BUS) {
             PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 READ-BACK Finished! task="<<task<<endl);
         }
-        // 内部的回读清洗校验任务完成，不计入业务延迟统计，直接结束
-        return; 
+        if (ECC_WB_EN && ECC_WB_MODE == 1 && (rand() % 100) < WB_RATIO) {
+            schedule_ecc(DATA_WRITE);
+        }
+        return;
     }
+
+    uint32_t delay = (now() - timeAdded);
 
     // 正常业务的读延迟统计
     if (DEBUG_BUS) {
@@ -1110,54 +1133,11 @@ void MemoryController::ReturnData_statistics(uint64_t task, uint64_t timeAdded, 
         min_delay_id = task;
     }
     
-    // 收尾：无论是 Mode 0 还是 1，均触发物理回写 (DATA_WRITE)
     if (ECC_WB_EN) {
-        // 任务已彻底完成，清除标记，防止内存泄漏
-        ecc_checked_tasks.erase(task); 
+        ecc_checked_tasks.erase(task);
         task_ecc_release_time.erase(task);
-        
-        // 检查 data_fresh() 中结果，是否需要真正产生物理回写
-        auto it_wb = tasks_need_ecc_wb.find(task);
-        if (it_wb != tasks_need_ecc_wb.end()) {
-            tasks_need_ecc_wb.erase(it_wb); 
-            
-            auto it = pending_TransactionQue.find(task);
-            if (it != pending_TransactionQue.end()) {
-                TRANS_MSG &msg = it->second;
-                
-                // 生成 DATA_WRITE
-                Transaction *trans = new Transaction;
-                trans->transactionType = DATA_WRITE;
-                trans->address = msg.address;
-                trans->rank = msg.rank;
-                trans->bankIndex = msg.bankIndex;
-                trans->row = msg.row;
-                trans->col = msg.col;
-                trans->group = msg.group;
-                trans->sid = msg.sid;
-                trans->data_size = msg.data_size;
-                trans->burst_length = msg.burst_length;
-                trans->qos = msg.qos;
-                trans->mid = msg.mid;
-                trans->task = task;      // 直接复用原业务读请求的 task ID
-                trans->pre_act = false;
-                trans->mask_wcmd = false;
-                trans->ap_cmd = false;
-                trans->data_ready_cnt = trans->burst_length + 1;
-                trans->wb = true;        // 依靠 wb_flag = true 将其与外部命令区分开
-                
-                // 延时已经在物理层熬过了，这里直接进就绪队列即可，立刻执行
-                ecc_wb_queue.push_back(trans);
-                
-                if (DEBUG_BUS) {
-                    PRINTN(setw(10)<<now()<<" -- ECC WB: Scheduled WRITE immediately (delay served). task="<<task<<endl);
-                }
-
-                // 如果是 Mode 1：将这个复用的 task ID 登记在册，去 data_fresh 监听它的 Write 完成
-                if (ECC_WB_MODE == 1) {
-                    ecc_wb_pending_wr[task] = msg;
-                }
-            }
+        if (tasks_need_ecc_wb.erase(task)) {
+            schedule_ecc(ECC_WB_MODE == 1 ? DATA_READ : DATA_WRITE);
         }
     }
 }
@@ -3564,7 +3544,7 @@ void MemoryController::refresh(unsigned sc) {
     // else pop from command queue if it's not empty
     bool combo_emode_unable = EM_ENABLE && (EM_MODE==2) && (sc==1); 
     if (IS_GD2) {
-        if (PBR_EN && sc == 0) gd2_dist_refresh();
+        if (PBR_EN && arb_enable) gd2_dist_refresh();
         return;
     } else if (AREF_EN || PBR_EN) { // other spec
         if (DMC_V590 && SBR_IDLE_ADAPT_EN) {
@@ -3698,8 +3678,8 @@ void MemoryController::gd2_dist_refresh() {
         for (size_t j = 0; j < NUM_BANKS; j ++) {
             unsigned bank = i * NUM_BANKS + j;
             for (size_t k = 0; k < NUM_MATGRPS; k ++) {
-                if (ACT_NUM_SEND_PBR > 0 &&
-                        DistRefState[bank].act_cmd_cnt[k] >= ACT_NUM_SEND_PBR &&
+                if (PRE_NUM_SEND_PBR > 0 &&
+                        DistRefState[bank].act_cmd_cnt[k] >= PRE_NUM_SEND_PBR &&
                         DistRefState[bank].dist_pstpnd_num[k] == 0) {
                     DistRefState[bank].dist_pstpnd_num[k] = 1;
                 }
@@ -3707,8 +3687,8 @@ void MemoryController::gd2_dist_refresh() {
 
             DistRefState[bank].force_dist_refresh = false;
             for (size_t k = 0; k < NUM_MATGRPS; k ++) {
-                if (ACT_NUM_SEND_PBR > 0 && DistRefState[bank].act_cmd_cnt[k] >=
-                        ACT_NUM_SEND_PBR + DSTREF_POSTPONE_ACT_MAT) {
+                if (PRE_NUM_SEND_PBR > 0 && DistRefState[bank].act_cmd_cnt[k] >=
+                        PRE_NUM_SEND_PBR + DSTREF_POSTPONE_ACT_MAT) {
                     DistRefState[bank].force_dist_refresh = true;
                     break;
                 }
@@ -3725,45 +3705,29 @@ void MemoryController::gd2_dist_refresh() {
                 }
             }
 
-            if (ACT_NUM_SEND_PBR_BANK > 0 &&
-                    DistRefState[bank].act_cmd_cnt_bank >= ACT_NUM_SEND_PBR_BANK &&
+            if (PRE_NUM_SEND_PBR_BANK > 0 &&
+                    DistRefState[bank].act_cmd_cnt_bank >= PRE_NUM_SEND_PBR_BANK &&
                     DistRefState[bank].dist_pstpnd_num_bank == 0) {
                 DistRefState[bank].dist_pstpnd_num_bank = 1;
             }
 
-            DistRefState[bank].force_dist_refresh_bank = ACT_NUM_SEND_PBR_BANK > 0 &&
+            DistRefState[bank].force_dist_refresh_bank = PRE_NUM_SEND_PBR_BANK > 0 &&
                     DistRefState[bank].act_cmd_cnt_bank >=
-                    ACT_NUM_SEND_PBR_BANK + DSTREF_POSTPONE_ACT_BANK;
+                    PRE_NUM_SEND_PBR_BANK + DSTREF_POSTPONE_ACT_BANK;
             bool bank_distref_ready = DistRefState[bank].dist_pstpnd_num_bank > 0;
+            bool force_disturb = DistRefState[bank].force_dist_refresh ||
+                    DistRefState[bank].force_dist_refresh_bank;
 
-            if ((DistRefState[bank].force_dist_refresh || DistRefState[bank].force_dist_refresh_bank) &&
-                    DistRefState[bank].state == DIST_IDLE &&
-                    bankStates[bank].state->currentBankState == RowActive) {
-                if (arb_enable && (now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[i].size() < 4) {
-                    Cmd *c = new Cmd;
-                    c->state = working;
-                    c->cmd_type = PRECHARGE_PB_CMD;
-                    c->bank = bankStates[bank].bank;
-                    c->rank = bankStates[bank].rank;
-                    c->group = bankStates[bank].group;
-                    c->bankIndex = bankStates[bank].bankIndex;
-                    c->row = bankStates[bank].state->openRowAddress;
-                    c->cmd_source = 2;
-                    c->task = 0xFFFFFFFFFFFFFFE;
-                    CmdQueue.push_back(c);
-                }
-                continue;
-            }
-
-            if (DistRefState[bank].state == DIST_IDLE &&
-                    bankStates[bank].state->currentBankState != Idle) continue;
-            if (DistRefState[bank].state == DIST_IDLE && !DistRefState[bank].force_dist_refresh &&
-                    !DistRefState[bank].force_dist_refresh_bank && bank_cnt[bank] > 0 &&
+            if (bankStates[bank].state->currentBankState != Idle &&
+                    bankStates[bank].state->currentBankState != Refreshing &&
+                    !(force_disturb &&
+                    bankStates[bank].state->currentBankState == RowActive)) continue;
+            if (!force_disturb && bank_cnt[bank] > 0 &&
                     bankStates[bank].state->currentBankState != Refreshing) continue;
             if (bankStates[bank].state->act_executing) continue;
             if (SEND_DSTREF_SERIAL && has_bank_distref && distref_bank != bank) continue;
 
-            if (has_matgrp_distref || bank_distref_ready || DistRefState[bank].state != DIST_IDLE) {
+            if (has_matgrp_distref || bank_distref_ready) {
                 unsigned rank = bank / NUM_BANKS;
                 funcState[rank].wakeup = true;
                 if (RankState[rank].lp_state != IDLE) continue;
@@ -3777,7 +3741,7 @@ void MemoryController::gd2_dist_refresh() {
                         break;
                     }
                     case SEND_ACT1 : {
-                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextActivate1) {
+                        if ((now() + 1) >= bankStates[bank].state->nextActivate1) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = ACTIVATE1_DST_CMD;
@@ -3797,7 +3761,7 @@ void MemoryController::gd2_dist_refresh() {
                         break;
                     }
                     case SEND_ACT2 : {
-                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextActivate2 && tFAWCountdown[rank].size() < 4) {
+                        if ((now() + 1) >= bankStates[bank].state->nextActivate2 && tFAWCountdown[rank].size() < 4) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = ACTIVATE2_DST_CMD;
@@ -3817,7 +3781,7 @@ void MemoryController::gd2_dist_refresh() {
                         break;
                     }
                     case SEND_PRE : {
-                        if (arb_enable && (now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[rank].size() < 4) {
+                        if ((now() + 1) >= bankStates[bank].state->nextPrecharge && tFPWCountdown[rank].size() < 4) {
                             Cmd *c = new Cmd;
                             c->state = working;
                             c->cmd_type = PRECHARGE_PB_DST_CMD;
@@ -7114,6 +7078,20 @@ void MemoryController::update_rw_schedulable_counts() {
             rw_schedulable_write_cnt++;
         }
     }
+    if (DEBUG_BUS && rcmd_bp_byrp &&
+            (rw_schedulable_read_cnt == 0 || rw_schedulable_write_cnt == 0)) {
+        PRINTN(setw(10)<<now()<<" -- DBG_RW_COUNTS :: sched_read="<<rw_schedulable_read_cnt
+                <<", sched_write="<<rw_schedulable_write_cnt<<", queue="<<transactionQueue.size()
+                <<", rpfifo_bp="<<rcmd_bp_byrp<<", rpfifo_level="<<rp_fifo.size()<<endl);
+        for (auto &trans : transactionQueue) {
+            if (trans->transactionType == DATA_READ && trans->issue_size != 0) {
+                PRINTN(setw(10)<<now()<<" -- DBG_PARTIAL_READ :: task="<<trans->task
+                        <<", issue_size="<<trans->issue_size<<", data_size="<<trans->data_size
+                        <<", trans_size="<<trans->trans_size<<", bank="<<trans->bankIndex
+                        <<", timeout="<<trans->timeout<<", bp_by_tout="<<trans->bp_by_tout<<endl);
+            }
+        }
+    }
 }
 
 void MemoryController::update_rwgroup_state() {
@@ -7277,11 +7255,6 @@ void MemoryController::update_rwgroup_state() {
 
 uint8_t MemoryController::GetEffectiveRwGroup() const {
     return rw_sync_group_valid ? rw_sync_group : rw_group_state[0];
-}
-
-uint8_t MemoryController::GetExecutionRwState() const {
-    if (GetEffectiveRwGroup() == NO_GROUP) return NO_GROUP;
-    return in_write_group ? WRITE_GROUP : READ_GROUP;
 }
 
 MemoryController::RwGroupSnapshot MemoryController::GetRwGroupSnapshot() const {
@@ -7523,6 +7496,12 @@ void MemoryController::que_pipeline() {
     for (auto &trans : transactionQueue) {
         if (trans->issue_size != 0) rw_exec_cnt ++;
     }
+    if (DEBUG_BUS && rcmd_bp_byrp && rw_exec_cnt >= EXEC_NUMBER) {
+        PRINTN(setw(10)<<now()<<" -- DBG_RW_EXEC :: rw_exec_cnt="<<rw_exec_cnt
+                <<", EXEC_NUMBER="<<EXEC_NUMBER<<", sched_read="<<rw_schedulable_read_cnt
+                <<", sched_write="<<rw_schedulable_write_cnt<<", queue="<<transactionQueue.size()
+                <<", rpfifo_level="<<rp_fifo.size()<<endl);
+    }
     
     //label lqos cmd ( pri lower than LQOS_BP_LEVEL)
     if (LQOS_BP_EN) {    
@@ -7617,7 +7596,14 @@ void MemoryController::que_pipeline() {
                 bankStates[bank].hold_precharge = true;
                 if (DEBUG_BUS) {
                     PRINTN(setw(10)<<now()<<" -- HPRE :: WRITE_GROUP, task="
-                            <<trans->task<<", bank="<<trans->bankIndex<<endl);
+                            <<trans->task<<", bank="<<trans->bankIndex
+                            <<", issue_size="<<trans->issue_size<<", rw_exec_cnt="<<rw_exec_cnt
+                            <<", EXEC_NUMBER="<<EXEC_NUMBER<<", sched_read="<<rw_schedulable_read_cnt
+                            <<", sched_write="<<rw_schedulable_write_cnt<<", rpfifo_bp="<<rcmd_bp_byrp
+                            <<", rpfifo_level="<<rp_fifo.size()<<", rw_group="<<GetEffectiveRwGroup()
+                            <<", in_write_group="<<(rw_sync_group_valid ? rw_sync_in_write_group : in_write_group)
+                            <<", open_row="<<bankStates[bank].state->openRowAddress
+                            <<", last_cmd="<<bankStates[bank].state->lastCmdType<<endl);
                 }
                 break;
             } else if (rk_grp_state != NO_RGRP && unsigned(rk_grp_state>>1) == trans->rank &&
@@ -7629,14 +7615,6 @@ void MemoryController::que_pipeline() {
                             <<+rk_grp_state<<endl);
                 }
                 break;
-            }
-        }
-    }
-
-    if (IS_GD2) {
-        for (size_t bank = 0; bank < NUM_RANKS * NUM_BANKS; bank ++) {
-            if (DistRefState[bank].force_dist_refresh || DistRefState[bank].force_dist_refresh_bank) {
-                bankStates[bank].hold_precharge = false;
             }
         }
     }
@@ -7848,7 +7826,6 @@ void MemoryController::data_fresh() {
         }
     }
 
-    // 物理写数据发送与 Mode 1 回读触发
     unsigned size = writeDataToSend.size();
     if (size > 0) {
         for (size_t i = 0; i < size; i ++) {
@@ -7867,45 +7844,9 @@ void MemoryController::data_fresh() {
                 wdata_info[wr_task]--;
             }
             
-            // 当这笔 Write 的最后一个 Chunk 发送完毕时：
-            if (wdata_info[wr_task] == 0) {
-                wdata_info.erase(wr_task);
+            if (it != wdata_info.end() && it->second == 0) {
+                wdata_info.erase(it);
                 if (IECC_ENABLE) tasks_info[wr_task].wr_finish = true;
-
-                //  ECC 阶段 2 触发器：拦截 Mode 1 的 Write 完成，立即生成 Read
-                if (ECC_WB_EN && ECC_WB_MODE == 1) {
-                    auto it_wr = ecc_wb_pending_wr.find(wr_task);
-                    if (it_wr != ecc_wb_pending_wr.end()) {
-                        TRANS_MSG &msg = it_wr->second;
-                        
-                        Transaction *trans = new Transaction;
-                        trans->transactionType = DATA_READ;
-                        trans->address = msg.address;
-                        trans->rank = msg.rank;
-                        trans->bankIndex = msg.bankIndex;
-                        trans->row = msg.row;
-                        trans->col = msg.col;
-                        trans->group = msg.group;
-                        trans->sid = msg.sid;
-                        trans->data_size = msg.data_size;
-                        trans->burst_length = msg.burst_length;
-                        trans->qos = msg.qos;
-                        trans->mid = msg.mid;
-                        trans->task = wr_task; // 继续沿用这个 task_id 
-                        trans->pre_act = false;
-                        trans->mask_wcmd = false;
-                        trans->ap_cmd = false;
-                        trans->wb = true;      // 标记为内部清洗任务
-                        
-                        ecc_wb_queue.push_back(trans); 
-                        
-                        if (DEBUG_BUS) {
-                            PRINTN(setw(10)<<now()<<" -- ECC WB: Mode 1 WRITE Finished -> Generated READ-BACK, task="<<wr_task<<endl);
-                        }
-                        ecc_wb_pending_wr.erase(it_wr); 
-                    }
-                }
-                // -------------------------------------------------------------
             }
             
             if (DEBUG_BUS) {
@@ -7929,6 +7870,7 @@ void MemoryController::data_fresh() {
                     auto it = pending_TransactionQue.find(task);
                     if (it != pending_TransactionQue.end()) {
                         TRANS_MSG &msg = it->second;
+                        if (msg.wb) continue;
                         uint32_t step_weight = msg.data_size / 128;
                         if (step_weight == 0) step_weight = 1;
                         
@@ -7940,8 +7882,7 @@ void MemoryController::data_fresh() {
                             uint32_t ecc_penalty = ceil(float(tWB_DLY) / tDFI);
                             task_ecc_release_time[task] = now() + ecc_penalty; 
                             
-                            // 掷骰子：决定要不要回写
-                            if ((rand() % 100) < WB_RATIO) {
+                            if (ECC_WB_MODE == 1 || (rand() % 100) < WB_RATIO) {
                                 tasks_need_ecc_wb.insert(task);
                             }
                             
@@ -8091,6 +8032,11 @@ void MemoryController::data_fresh() {
                     } else if (rp_fifo.size() < RPFIFO_DEPTH) {
                         rp_fifo.push_back(read_data_buffer[i]);
                         rpfifo_write_this_cycle = true;
+                        if (DEBUG_BUS && !rcmd_bp_byrp) {
+                            PRINTN(setw(10)<<now()<<" -- DBG_RPFIFO_BP_ON :: task="<<task
+                                    <<", rpfifo_level="<<rp_fifo.size()<<", amfull="<<RPFIFO_AMFULL_TH
+                                    <<", depth="<<RPFIFO_DEPTH<<endl);
+                        }
                         rcmd_bp_byrp = true;
                         read_data_buffer.erase(read_data_buffer.begin() + i);
                         if (DEBUG_BUS) {
@@ -8191,7 +8137,11 @@ void MemoryController::data_fresh() {
         }
     }
 
-    if (rp_fifo.empty()) {
+    if (rp_fifo.size() < RPFIFO_AMFULL_TH) {
+        if (DEBUG_BUS && rcmd_bp_byrp) {
+            PRINTN(setw(10)<<now()<<" -- DBG_RPFIFO_BP_OFF :: rpfifo_level="<<rp_fifo.size()
+                    <<", amfull="<<RPFIFO_AMFULL_TH<<endl);
+        }
         rcmd_bp_byrp = false;
         // if (DEBUG_BUS) {
         //     PRINTN(setw(10)<<now()<<" -- Rp_bp_flag="<<rcmd_bp_byrp<<endl);
@@ -8214,9 +8164,13 @@ void MemoryController::update_state_pre() {
         // 优先压入 ECC 回写命令队列的最前端任务
         if (!ecc_wb_queue.empty()) {
             Transaction *head = ecc_wb_queue.front();
-            bool accepted = addTransaction(head);
+            bool task_busy = pending_TransactionQue.count(head->task) != 0;
+            for (auto &trans : transactionQueue) {
+                if (trans->task == head->task) task_busy = true;
+            }
+            bool accepted = !task_busy && addTransaction(head);
             if (accepted) {
-                if (head->transactionType == DATA_READ) {
+                if (head->transactionType == DATA_READ && !pending_TransactionQue.count(head->task)) {
                     push_pending_TransactionQue(head);
                 }
                 // 成功入队后，从队列头部抹除
@@ -8915,12 +8869,38 @@ void MemoryController::need_issue(Transaction *trans) {
                 }
             } else {
                 trans->nextCmd = INVALID;
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- DBG_INVALID_EXEC :: task="<<trans->task
+                        <<", type="<<trans->transactionType<<", issue_size="<<trans->issue_size
+                        <<", data_size="<<trans->data_size<<", trans_size="<<trans->trans_size
+                        <<", rw_exec_cnt="<<rw_exec_cnt<<", EXEC_NUMBER="<<EXEC_NUMBER
+                        <<", rcmd_bp_byrp="<<rcmd_bp_byrp<<", rpfifo_level="<<rp_fifo.size()
+                        <<", sched_read="<<rw_schedulable_read_cnt<<", sched_write="<<rw_schedulable_write_cnt
+                        <<", rw_group="<<GetEffectiveRwGroup()<<", in_write_group="<<in_write_group
+                        <<", hold_precharge="<<bankStates[trans->bankIndex].hold_precharge
+                        <<", open_row="<<openRow<<", last_cmd="<<bankStates[trans->bankIndex].state->lastCmdType
+                        <<", timeout="<<trans->timeout<<", bp_by_tout="<<trans->bp_by_tout<<endl);
+            }
             }
         } else {
             if (!bankStates[trans->bankIndex].hold_precharge) {
                 trans->nextCmd = PRECHARGE_PB_CMD;
             }
-            else trans->nextCmd = INVALID;
+        else {
+            trans->nextCmd = INVALID;
+            if (DEBUG_BUS) {
+                PRINTN(setw(10)<<now()<<" -- DBG_INVALID_HPRE :: task="<<trans->task
+                        <<", type="<<trans->transactionType<<", issue_size="<<trans->issue_size
+                        <<", data_size="<<trans->data_size<<", trans_size="<<trans->trans_size
+                        <<", rw_exec_cnt="<<rw_exec_cnt<<", EXEC_NUMBER="<<EXEC_NUMBER
+                        <<", rcmd_bp_byrp="<<rcmd_bp_byrp<<", rpfifo_level="<<rp_fifo.size()
+                        <<", sched_read="<<rw_schedulable_read_cnt<<", sched_write="<<rw_schedulable_write_cnt
+                        <<", rw_group="<<GetEffectiveRwGroup()<<", in_write_group="<<in_write_group
+                        <<", hold_precharge="<<bankStates[trans->bankIndex].hold_precharge
+                        <<", open_row="<<openRow<<", last_cmd="<<bankStates[trans->bankIndex].state->lastCmdType
+                        <<", timeout="<<trans->timeout<<", bp_by_tout="<<trans->bp_by_tout<<endl);
+            }
+        }
         }
     } else {
         if (IS_LP4 || IS_LP5 || IS_LP6 || IS_GD2) {
@@ -8996,6 +8976,12 @@ void MemoryController::lc(Transaction *t) {
             }
         }
     }
+    if ((DistRefState[t->bankIndex].force_dist_refresh || DistRefState[t->bankIndex].force_dist_refresh_bank) && t->issue_size == 0) {
+        if (DEBUG_BUS) {
+            PRINTN(setw(10)<<now()<<" -- LC :: GD2 force disturb refresh bp, bank"<<t->bankIndex<<", task="<<t->task<<endl);
+        }
+        return;
+    }
     // todo: change for enahnced DBR?
     for (size_t rank = 0; rank < NUM_RANKS; rank ++) {
         if (force_pbr_refresh[rank][sub_channel] && SBR_REQ_MODE == 1 && t->issue_size == 0) {
@@ -9051,22 +9037,24 @@ void MemoryController::lc(Transaction *t) {
         return;
     }
 
-    if (t->transactionType==DATA_READ && rcmd_bp_byrp) {
+    if (t->transactionType==DATA_READ && t->issue_size == 0 && rcmd_bp_byrp) {
         if (DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- LC :: backpress by rpram, task="<<t->task<<endl);
+            PRINTN(setw(10)<<now()<<" -- DBG_RPFIFO_READ_BLOCK :: task="<<t->task
+                    <<", issue_size="<<t->issue_size<<", data_size="<<t->data_size
+                    <<", trans_size="<<t->trans_size<<", bank="<<t->bankIndex
+                    <<", rw_exec_cnt="<<rw_exec_cnt<<", EXEC_NUMBER="<<EXEC_NUMBER
+                    <<", sched_read="<<rw_schedulable_read_cnt<<", sched_write="<<rw_schedulable_write_cnt
+                    <<", rw_group="<<GetEffectiveRwGroup()<<", in_write_group="<<in_write_group
+                    <<", hold_precharge="<<bankStates[t->bankIndex].hold_precharge
+                    <<", open_row="<<bankStates[t->bankIndex].state->openRowAddress
+                    <<", last_cmd="<<bankStates[t->bankIndex].state->lastCmdType
+                    <<", timeout="<<t->timeout<<", bp_by_tout="<<t->bp_by_tout
+                    <<", rpfifo_level="<<rp_fifo.size()<<endl);
         }
         return;
     }
 
     need_issue(t);
-
-    if ((DistRefState[t->bankIndex].force_dist_refresh || DistRefState[t->bankIndex].force_dist_refresh_bank) &&
-            t->issue_size == 0 && t->nextCmd != PRECHARGE_PB_CMD) {
-        if (DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- LC :: GD2 force disturb refresh bp, bank"<<t->bankIndex<<", task="<<t->task<<endl);
-        }
-        return;
-    }
 
     if (t->nextCmd == PRECHARGE_PB_CMD && t->timeout && t->issue_size == 0 && !t->act_executing) {
         for (auto &other : transactionQueue) {
@@ -9241,7 +9229,21 @@ void MemoryController::lc(Transaction *t) {
 
     if (t->nextCmd == INVALID) {
         if (DEBUG_BUS) {
-            PRINTN(setw(10)<<now()<<" -- LC :: Invalid command. task="<<t->task<<endl);
+            if (t->task == 213948 || rcmd_bp_byrp) {
+                PRINTN(setw(10)<<now()<<" -- DBG_INVALID_LC :: task="<<t->task
+                        <<", type="<<t->transactionType<<", issue_size="<<t->issue_size
+                        <<", data_size="<<t->data_size<<", trans_size="<<t->trans_size
+                        <<", rw_exec_cnt="<<rw_exec_cnt<<", EXEC_NUMBER="<<EXEC_NUMBER
+                        <<", rcmd_bp_byrp="<<rcmd_bp_byrp<<", rpfifo_level="<<rp_fifo.size()
+                        <<", sched_read="<<rw_schedulable_read_cnt<<", sched_write="<<rw_schedulable_write_cnt
+                        <<", rw_group="<<effective_rw_group<<", in_write_group="<<effective_in_write_group
+                        <<", ch_cmd_cnt="<<effective_ch_cmd_cnt
+                        <<", hold_precharge="<<bankStates[t->bankIndex].hold_precharge
+                        <<", open_row="<<bankStates[t->bankIndex].state->openRowAddress
+                        <<", last_cmd="<<bankStates[t->bankIndex].state->lastCmdType
+                        <<", next_cmd="<<t->nextCmd<<", timeout="<<t->timeout
+                        <<", bp_by_tout="<<t->bp_by_tout<<endl);
+            }
         }
         return;
     }
@@ -9909,8 +9911,6 @@ bool MemoryController::addTransaction(Transaction *trans) {
         sid_cnt[trans->rank][trans->sid] ++;
         acc_rank_cnt[trans->rank] ++;
         acc_bank_cnt[trans->bankIndex] ++;
-        acc_bg_cnt[trans->rank][trans->group] ++;
-        if (IS_GD2) acc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
 
         if (MPAM_PUSH_EN) pushQosForSameMpamTrans(trans);
         if (MID_PUSH_EN) pushQosForSameMidTrans(trans);
@@ -9959,8 +9959,6 @@ bool MemoryController::addTransaction(Transaction *trans) {
             r_qos_cnt[trans->qos] ++;
             racc_rank_cnt[trans->rank] ++;
             racc_bank_cnt[trans->bankIndex] ++;
-            racc_bg_cnt[trans->rank][trans->group] ++;
-            if (IS_GD2) racc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
             TotalDmcRdBytes += trans->data_size;
             if (trans->data_size == 32) TotalDmcRd32B ++;
             else if (trans->data_size == 64) TotalDmcRd64B ++;
@@ -9995,8 +9993,6 @@ bool MemoryController::addTransaction(Transaction *trans) {
 //            DEBUG(" total write cnt="<<totalWrites);
             wacc_rank_cnt[trans->rank] ++;
             wacc_bank_cnt[trans->bankIndex] ++;
-            wacc_bg_cnt[trans->rank][trans->group] ++;
-            if (IS_GD2) wacc_mat_cnt[trans->rank][trans->row % NUM_MATGRPS] ++;
             TotalDmcWrBytes += trans->data_size;
             if (trans->data_size == 32) TotalDmcWr32B ++;
             else if (trans->data_size == 64) TotalDmcWr64B ++;
@@ -10258,11 +10254,21 @@ void MemoryController::push_pending_TransactionQue(Transaction *trans) {
     msg.data_collected_cnt = 0;
     msg.channel = trans->channel;
     msg.rank = trans->rank;
+    msg.address = trans->address;
+    msg.bank = trans->bank;
+    msg.addr_col = trans->addr_col;
+    msg.bankIndex = trans->bankIndex;
+    msg.row = trans->row;
+    msg.col = trans->col;
+    msg.group = trans->group;
+    msg.sid = trans->sid;
     msg.data_size = trans->data_size;
     msg.burst_length = trans->burst_length;
     msg.qos = trans->qos;
     msg.mid = trans->mid;
     msg.pf_type = trans->pf_type;
+    msg.sub_pftype = trans->sub_pftype;
+    msg.sub_src = trans->sub_src;
     msg.wb = trans->wb;
     msg.ps = trans->ps;
     msg.rdata_queued = false;
