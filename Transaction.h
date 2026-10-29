@@ -20,7 +20,9 @@ struct TRANS_MSG {
     uint8_t channel;
     uint8_t rank;
     uint32_t sid;
-    uint32_t address;
+    uint64_t address;
+    uint32_t bank;
+    uint32_t addr_col;
     uint32_t bankIndex;
     uint32_t row;
     uint32_t col;
@@ -48,6 +50,8 @@ struct TRANS_MSG {
         rank = 0;
         sid = 0;
         address = 0;
+        bank = 0;
+        addr_col = 0;
         bankIndex = 0;
         row = 0;
         col = 0;
@@ -188,6 +192,7 @@ struct hha_command {
     bool     ap_cmd;
     bool     mask_wcmd;
     bool     wrap_cmd;
+    bool     mergeflag;
     unsigned pf_type;//0:DMD, 1:PFL1, 2:PFL2, 3:PFL3
     unsigned sub_pftype;//0:NonPf, 1:SEQ, 2:STRIDE, 3:SMS, 4:NL, 5:PCP, 6:BBOP,
                         //7:IFUPF, 8:META, 9:BOF, 10:PF_MAX, 11:CONTEXT, 12:SPP
@@ -215,6 +220,7 @@ struct hha_command {
         ap_cmd = false;
         mask_wcmd = false;
         wrap_cmd = false;
+        mergeflag = true;
         pf_type = 0;
         sub_pftype = 0;
         sub_src = 0;
@@ -347,6 +353,7 @@ public:
     bool     ap_cmd;
     bool     mask_wcmd;
     bool     wrap_cmd;
+    bool     mergeflag;
     unsigned pf_type;
     unsigned sub_pftype;
     unsigned sub_src;
