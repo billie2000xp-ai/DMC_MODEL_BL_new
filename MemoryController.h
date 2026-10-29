@@ -212,8 +212,6 @@ public:
     unsigned SchedulableReadCnt() const {return rw_schedulable_read_cnt;};
     unsigned SchedulableWriteCnt() const {return rw_schedulable_write_cnt;};
     uint8_t GetLocalRwGroup() const {return rw_group_state[0];};
-    uint8_t GetExecutionRwState() const;
-    bool IsInWriteGroup() const {return in_write_group;};
     RwGroupSnapshot GetRwGroupSnapshot() const;
     uint8_t GetEffectiveRwGroup() const;
     void SetRwSyncGroup(uint8_t group);
@@ -341,16 +339,10 @@ public:
     vector<uint32_t> bank_cas_delay;
     vector<uint32_t> acc_rank_cnt;
     vector<uint32_t> acc_bank_cnt;
-    vector<vector<uint32_t>> acc_bg_cnt;
-    vector<vector<uint32_t>> acc_mat_cnt;
     vector<uint32_t> racc_rank_cnt;
     vector<uint32_t> racc_bank_cnt;
-    vector<vector<uint32_t>> racc_bg_cnt;
-    vector<vector<uint32_t>> racc_mat_cnt;
     vector<uint32_t> wacc_rank_cnt;
     vector<uint32_t> wacc_bank_cnt;
-    vector<vector<uint32_t>> wacc_bg_cnt;
-    vector<vector<uint32_t>> wacc_mat_cnt;
     vector<uint32_t> active_cmd_cnt;
     vector<uint32_t> page_cmd_cnt;
     vector<uint32_t> page_timeout_rd;
@@ -665,9 +657,8 @@ public:
 
     vector <bool> is_mat_distref;
     vector <unsigned> fg_hit_count;
-    bool write_port_busy_this_cycle; // 用于单写端口仲裁
+    bool write_port_busy_this_cycle = false;
     uint32_t ecc_wb_cnt;
-    std::unordered_map<uint64_t, TRANS_MSG> ecc_wb_pending_wr; // 用于 Mode 1：等待 Write 结束后触发 Read
     std::vector<Transaction *> ecc_wb_queue;  
     std::vector<Transaction *> ps_rd_queue;
     std::vector<std::pair<Transaction *, uint64_t>> delayed_ecc_wb_queue;  // 延迟结束的时间戳
